@@ -31,13 +31,14 @@ from huggingface_hub.constants import REPOCARD_NAME
 from huggingface_hub.errors import RevisionNotFoundError
 
 from lerobot.constants import HF_LEROBOT_HOME
-from lerobot.datasets.compute_stats import aggregate_stats, compute_episode_stats
+from lerobot.datasets.compute_stats import aggregate_stats, compute_episode_stats, compute_stats
 from lerobot.datasets.image_writer import AsyncImageWriter, write_image
 from lerobot.datasets.utils import (
     DEFAULT_FEATURES,
     DEFAULT_IMAGE_PATH,
     INFO_PATH,
     TASKS_PATH,
+    STATS_PATH,
     _validate_feature_names,
     append_jsonlines,
     backward_compatible_episodes_stats,
@@ -64,6 +65,7 @@ from lerobot.datasets.utils import (
     write_episode_stats,
     write_info,
     write_json,
+    serialize_dict,
 )
 from lerobot.datasets.video_utils import (
     VideoFrame,
@@ -275,6 +277,16 @@ class LeRobotDatasetMetadata:
         self.stats = aggregate_stats([self.stats, episode_stats]) if self.stats else episode_stats
         write_episode_stats(episode_index, episode_stats, self.root)
 
+    def write_video_info(self) -> None:
+        """
+        Warning: this function writes info from first episode videos, implicitly assuming that all videos have
+        been encoded the same way. Also, this means it assumes the first episode exists.
+        """
+        for key in self.video_keys:
+            if not self.features[key].get("info", None):
+                video_path = self.root / self.get_video_file_path(ep_index=0, vid_key=key)
+                self.info["features"][key]["info"] = get_video_info(video_path)
+                
     def update_video_info(self) -> None:
         """
         Warning: this function writes info from first episode videos, implicitly assuming that all videos have
@@ -952,6 +964,16 @@ class LeRobotDataset(torch.utils.data.Dataset):
         if self.image_writer is not None:
             self.image_writer.wait_until_done()
 
+
+    def encode_videos(self) -> None:
+        """
+        Use ffmpeg to convert frames stored as png into mp4 videos.
+        Note: `encode_video_frames` is a blocking call. Making it asynchronous shouldn't speedup encoding,
+        since video encoding with ffmpeg is already using multithreading.
+        """
+        for ep_idx in range(self.meta.total_episodes):
+            self.encode_episode_videos(ep_idx)
+
     def encode_episode_videos(self, episode_index: int) -> None:
         """
         Use ffmpeg to convert frames stored as png into mp4 videos.
@@ -1002,6 +1024,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
         logging.info("Batch video encoding completed")
 
+    
     @classmethod
     def create(
         cls,
