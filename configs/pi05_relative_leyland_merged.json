@@ -15,6 +15,16 @@
     "relative_exclude_joints": ["gripper"],
     "n_action_steps": 10,
     "optimizer_lr": 2.5e-5,
+    "optimizer_betas": [
+        0.9,
+        0.95
+    ],
+    "optimizer_eps": 1e-08,
+    "optimizer_weight_decay": 0.01,
+    "optimizer_grad_clip_norm": 1.0,
+    "scheduler_warmup_steps": 1000,
+    "scheduler_decay_steps": 50000,
+    "scheduler_decay_lr": 2.5e-06,
     "empty_cameras": 1,
     "freeze_vision_encoder": true,
     "train_expert_only": false,
@@ -41,8 +51,8 @@
       "model.time_mlp_out"
     ]
   },
-  "output_dir": "./outputs/pi05_leyland_merged",
-  "job_name": "pi05_leyland_merged",
+  "output_dir": "outputs/pi05_relative_leyland_merged",
+  "job_name": "pi05_relative_leyland_merged",
   "batch_size": 32,
   "num_workers": 8,
   "steps": 50000,
@@ -50,6 +60,7 @@
   "seed": 1000,
   "wandb": {
     "enable": true,
+    "disable_artifact": true,
     "project": "pickplace"
   }
 }
