@@ -1,4 +1,6 @@
-# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+#!/usr/bin/env python
+
+# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import random
 
 import numpy as np
@@ -67,6 +70,17 @@ def test_serialize_deserialize_torch_rng(fixed_seed):
     val2 = torch.rand(1).item()
     deserialize_torch_rng_state(st)
     val3 = torch.rand(1).item()
+    assert val2 == val3
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
+def test_serialize_deserialize_torch_rng_mps(fixed_seed):
+    _ = torch.rand(1, device="mps").item()
+    st = serialize_torch_rng_state()
+    assert "torch_mps_rng_state" in st
+    val2 = torch.rand(1, device="mps").item()
+    deserialize_torch_rng_state(st)
+    val3 = torch.rand(1, device="mps").item()
     assert val2 == val3
 
 

@@ -14,14 +14,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import sys
 from enum import IntEnum
 from typing import Any
 
 import numpy as np
 
+from lerobot.lerobot_types import RobotAction
+from lerobot.utils.decorators import check_if_not_connected
+
 from ..teleoperator import Teleoperator
+from ..utils import TeleopEvents
 from .configuration_gamepad import GamepadTeleopConfig
+
+logger = logging.getLogger(__name__)
 
 
 class GripperAction(IntEnum):
@@ -52,6 +59,13 @@ class GamepadTeleop(Teleoperator):
 
         self.gamepad = None
 
+        self.hidapi_fallback = config.hidapi_fallback
+        if sys.platform == "darwin" and not self.hidapi_fallback:
+            logger.warning(
+                "On macOS, pygame may not reliably detect input from some controllers. "
+                "If you experience issues, set `hidapi_fallback=true`."
+            )
+
     @property
     def action_features(self) -> dict:
         if self.config.use_gripper:
@@ -72,9 +86,7 @@ class GamepadTeleop(Teleoperator):
         return {}
 
     def connect(self) -> None:
-        # use HidApi for macos
-        if sys.platform == "darwin":
-            # NOTE: On macOS, pygame doesn’t reliably detect input from some controllers so we fall back to hidapi
+        if self.hidapi_fallback:
             from .gamepad_utils import GamepadControllerHID as Gamepad
         else:
             from .gamepad_utils import GamepadController as Gamepad
@@ -82,7 +94,8 @@ class GamepadTeleop(Teleoperator):
         self.gamepad = Gamepad()
         self.gamepad.start()
 
-    def get_action(self) -> dict[str, Any]:
+    @check_if_not_connected
+    def get_action(self) -> RobotAction:
         # Update the controller to get fresh inputs
         self.gamepad.update()
 
@@ -107,12 +120,55 @@ class GamepadTeleop(Teleoperator):
 
         return action_dict
 
+    def get_teleop_events(self) -> dict[str, Any]:
+        """
+        Get extra control events from the gamepad such as intervention status,
+        episode termination, success indicators, etc.
+
+        Returns:
+            Dictionary containing:
+                - is_intervention: bool - Whether human is currently intervening
+                - terminate_episode: bool - Whether to terminate the current episode
+                - success: bool - Whether the episode was successful
+                - rerecord_episode: bool - Whether to rerecord the episode
+        """
+        if self.gamepad is None:
+            return {
+                TeleopEvents.IS_INTERVENTION: False,
+                TeleopEvents.TERMINATE_EPISODE: False,
+                TeleopEvents.SUCCESS: False,
+                TeleopEvents.RERECORD_EPISODE: False,
+            }
+
+        # Update gamepad state to get fresh inputs
+        self.gamepad.update()
+
+        # Check if intervention is active
+        is_intervention = self.gamepad.should_intervene()
+
+        # Get episode end status
+        episode_end_status = self.gamepad.get_episode_end_status()
+        terminate_episode = episode_end_status in [
+            TeleopEvents.RERECORD_EPISODE,
+            TeleopEvents.FAILURE,
+        ]
+        success = episode_end_status == TeleopEvents.SUCCESS
+        rerecord_episode = episode_end_status == TeleopEvents.RERECORD_EPISODE
+
+        return {
+            TeleopEvents.IS_INTERVENTION: is_intervention,
+            TeleopEvents.TERMINATE_EPISODE: terminate_episode,
+            TeleopEvents.SUCCESS: success,
+            TeleopEvents.RERECORD_EPISODE: rerecord_episode,
+        }
+
     def disconnect(self) -> None:
         """Disconnect from the gamepad."""
         if self.gamepad is not None:
             self.gamepad.stop()
             self.gamepad = None
 
+    @property
     def is_connected(self) -> bool:
         """Check if gamepad is connected."""
         return self.gamepad is not None

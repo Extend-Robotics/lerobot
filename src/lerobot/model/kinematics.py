@@ -12,7 +12,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import numpy as np
+
+from lerobot.utils.import_utils import require_package
+
+_placo_runtime_error: ImportError | None = None
+
+if TYPE_CHECKING:
+    import placo  # type: ignore[import-not-found]
+else:
+    try:
+        import placo  # type: ignore[import-not-found]
+    except ImportError as _placo_import_err:
+        placo = None
+        _placo_runtime_error = _placo_import_err
+
+
+def _raise_if_placo_unusable() -> None:
+    if placo is None and _placo_runtime_error is not None:
+        raise ImportError(
+            f"placo is installed but failed to import: {_placo_runtime_error!s}"
+        ) from _placo_runtime_error
 
 
 class RobotKinematics:
@@ -22,23 +46,18 @@ class RobotKinematics:
         self,
         urdf_path: str,
         target_frame_name: str = "gripper_frame_link",
-        joint_names: list[str] = None,
+        joint_names: list[str] | None = None,
     ):
         """
         Initialize placo-based kinematics solver.
 
         Args:
-            urdf_path: Path to the robot URDF file
-            target_frame_name: Name of the end-effector frame in the URDF
-            joint_names: List of joint names to use for the kinematics solver
+            urdf_path (str): Path to the robot URDF file
+            target_frame_name (str): Name of the end-effector frame in the URDF
+            joint_names (list[str] | None): List of joint names to use for the kinematics solver
         """
-        try:
-            import placo
-        except ImportError as e:
-            raise ImportError(
-                "placo is required for RobotKinematics. "
-                "Please install the optional dependencies of `kinematics` in the package."
-            ) from e
+        require_package("placo", extra="placo-dep")
+        _raise_if_placo_unusable()
 
         self.robot = placo.RobotWrapper(urdf_path)
         self.solver = placo.KinematicsSolver(self.robot)
@@ -52,7 +71,7 @@ class RobotKinematics:
         # Initialize frame task for IK
         self.tip_frame = self.solver.add_frame_task(self.target_frame_name, np.eye(4))
 
-    def forward_kinematics(self, joint_pos_deg):
+    def forward_kinematics(self, joint_pos_deg: np.ndarray) -> np.ndarray:
         """
         Compute forward kinematics for given joint configuration given the target frame name in the constructor.
 
@@ -77,8 +96,13 @@ class RobotKinematics:
         return self.robot.get_T_world_frame(self.target_frame_name)
 
     def inverse_kinematics(
-        self, current_joint_pos, desired_ee_pose, position_weight=1.0, orientation_weight=0.01
-    ):
+        self,
+        current_joint_pos: np.ndarray,
+        desired_ee_pose: np.ndarray,
+        position_weight: float = 1.0,
+        orientation_weight: float = 0.01,
+        max_iters: int = 8,
+    ) -> np.ndarray:
         """
         Compute inverse kinematics using placo solver.
 
@@ -87,6 +111,7 @@ class RobotKinematics:
             desired_ee_pose: Target end-effector pose as a 4x4 transformation matrix
             position_weight: Weight for position constraint in IK
             orientation_weight: Weight for orientation constraint in IK, set to 0.0 to only constrain position
+            max_iters: Number of placo Newton steps to run.
 
         Returns:
             Joint positions in degrees that achieve the desired end-effector pose
@@ -105,9 +130,10 @@ class RobotKinematics:
         # Configure the task based on position_only flag
         self.tip_frame.configure(self.target_frame_name, "soft", position_weight, orientation_weight)
 
-        # Solve IK
-        self.solver.solve(True)
-        self.robot.update_kinematics()
+        # Solve IK.
+        for _ in range(max_iters):
+            self.solver.solve(True)
+            self.robot.update_kinematics()
 
         # Extract joint positions
         joint_pos_rad = []

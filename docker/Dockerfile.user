@@ -18,8 +18,10 @@
 # docker build -f docker/Dockerfile.user -t lerobot-user .
 # docker run -it --rm lerobot-user
 
+# With USB physical access : docker run -it --device=/dev/ -v /dev/:/dev/ --rm lerobot-user
+
 # Configure the base image
-ARG PYTHON_VERSION=3.10
+ARG PYTHON_VERSION=3.12
 FROM python:${PYTHON_VERSION}-slim
 
 # Configure environment variables
@@ -31,6 +33,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential git curl libglib2.0-0 libegl1-mesa-dev ffmpeg \
     libusb-1.0-0-dev speech-dispatcher libgeos-dev portaudio19-dev \
+    cmake pkg-config ninja-build \
     && curl -LsSf https://astral.sh/uv/install.sh | sh \
     && mv /root/.local/bin/uv /usr/local/bin/uv \
     && useradd --create-home --shell /bin/bash user_lerobot \
@@ -57,14 +60,14 @@ ENV HOME=/home/user_lerobot \
 # run other Python projects in the same container without dependency conflicts.
 RUN uv venv
 
-# Install Python dependencies for caching
-COPY --chown=user_lerobot:user_lerobot pyproject.toml README.md MANIFEST.in ./
-COPY --chown=user_lerobot:user_lerobot src/ src/
-RUN uv pip install --no-cache ".[all]"
+# Install third-party dependencies separately for layer caching
+COPY --chown=user_lerobot:user_lerobot setup.py pyproject.toml uv.lock README.md MANIFEST.in ./
+RUN uv sync --locked --extra all --no-install-project --no-cache
 
-# Copy the rest of the application code
+# Copy the application code and install the local project
 # Make sure to have the git-LFS files for testing
 COPY --chown=user_lerobot:user_lerobot . .
+RUN uv sync --locked --extra all --no-cache
 
 # Set the default command
 CMD ["/bin/bash"]
