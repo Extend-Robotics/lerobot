@@ -1,0 +1,102 @@
+# Copyright 2026 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# LeRobot pi0.5 training image for NVIDIA H100 GPUs on GCP Compute Engine.
+#
+# Build from the LeRobot repository root:
+#   docker build -f docker/Dockerfile.pi05-h100-gcp -t lerobot-pi05-h100 .
+#
+# The host must provide the NVIDIA driver (>= 570.86 for the locked cu128
+# PyTorch wheels) and NVIDIA Container Toolkit. Keep caches, outputs, and
+# credentials outside the image:
+#   docker run --rm -it --gpus all --ipc=host \
+#     --ulimit memlock=-1 --ulimit stack=67108864 \
+#     -v /mnt/disks/training:/data \
+#     -e HF_TOKEN -e WANDB_API_KEY \
+#     lerobot-pi05-h100
+
+ARG UV_VERSION=0.12.11
+ARG CUDA_VERSION=12.8.1
+ARG OS_VERSION=24.04
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
+FROM nvidia/cuda:${CUDA_VERSION}-base-ubuntu${OS_VERSION}
+
+ARG PYTHON_VERSION=3.12
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    HOME=/home/lerobot \
+    PATH=/opt/lerobot/.venv/bin:${PATH} \
+    VIRTUAL_ENV=/opt/lerobot/.venv \
+    UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONFAULTHANDLER=1 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    CUDA_MODULE_LOADING=LAZY \
+    TORCH_CUDA_ARCH_LIST=9.0 \
+    TOKENIZERS_PARALLELISM=false \
+    NCCL_DEBUG=WARN \
+    TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
+    HF_HOME=/data/cache/huggingface \
+    HF_LEROBOT_HOME=/data/cache/huggingface/lerobot \
+    TORCH_HOME=/data/cache/torch \
+    TRITON_CACHE_DIR=/data/cache/triton \
+    WANDB_DIR=/data/wandb \
+    MUJOCO_GL=egl
+
+COPY --from=uv /uv /uvx /usr/local/bin/
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        ffmpeg \
+        git \
+        libegl1 \
+        libgl1 \
+        libglib2.0-0 \
+        python${PYTHON_VERSION} \
+        python${PYTHON_VERSION}-dev \
+        python${PYTHON_VERSION}-venv \
+        tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && if ! getent group ${GROUP_ID} >/dev/null; then groupadd --gid ${GROUP_ID} lerobot; fi \
+    && if ! getent passwd ${USER_ID} >/dev/null; then \
+        useradd --uid ${USER_ID} --gid ${GROUP_ID} --home-dir /home/lerobot --shell /bin/bash lerobot; \
+       fi \
+    && mkdir -p /home/lerobot /opt/lerobot /data/cache/huggingface/lerobot /data/cache/torch \
+        /data/cache/triton /data/wandb /data/outputs \
+    && chown -R ${USER_ID}:${GROUP_ID} /home/lerobot /opt/lerobot /data
+
+WORKDIR /opt/lerobot
+USER ${USER_ID}:${GROUP_ID}
+
+# Resolve the expensive third-party layer before copying source. The "training"
+# extra provides datasets/Accelerate/W&B and "pi" provides the pi0/pi0.5 stack.
+COPY --chown=${USER_ID}:${GROUP_ID} pyproject.toml uv.lock setup.py README.md MANIFEST.in ./
+RUN uv sync --locked --no-dev --extra training --extra pi \
+        --no-install-project --no-cache \
+    && chmod +x .venv/lib/python${PYTHON_VERSION}/site-packages/triton/backends/nvidia/bin/ptxas
+
+# Only package source is copied. Local datasets, tokens, and training outputs must
+# be supplied at runtime through /data or another mounted volume.
+COPY --chown=${USER_ID}:${GROUP_ID} src ./src
+RUN uv sync --locked --no-dev --extra training --extra pi --no-cache \
+    && lerobot-info
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/bin/bash"]

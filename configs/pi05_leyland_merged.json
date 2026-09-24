@@ -1,7 +1,7 @@
 {
   "dataset": {
-    "repo_id": "leyland_merged",
-    "root": "datasets/leyland_merged"
+    "repo_id": "leyland_merged_500",
+    "root": "datasets/leyland_merged_500"
   },
   "policy": {
     "type": "pi05",
@@ -49,8 +49,8 @@
       "model.time_mlp_out"
     ]
   },
-  "output_dir": "outputs/pi05_leyland_merged",
-  "job_name": "pi05_leyland_merged",
+  "output_dir": "outputs/pi05_leyland_merged_500",
+  "job_name": "pi05_leyland_merged_500",
   "batch_size": 32,
   "num_workers": 8,
   "steps": 50000,

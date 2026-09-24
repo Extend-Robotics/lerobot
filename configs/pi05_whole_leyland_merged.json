@@ -11,10 +11,8 @@
       "STATE": "MEAN_STD",
       "VISUAL": "IDENTITY"
     },
-    "use_relative_actions": true,
-    "relative_exclude_joints": ["gripper"],
     "n_action_steps": 10,
-    "optimizer_lr": 2.5e-5,
+    "optimizer_lr": 2.5e-05,
     "optimizer_betas": [
         0.9,
         0.95
@@ -26,7 +24,7 @@
     "scheduler_decay_steps": 50000,
     "scheduler_decay_lr": 2.5e-06,
     "empty_cameras": 1,
-    "freeze_vision_encoder": true,
+    "freeze_vision_encoder": false,
     "train_expert_only": false,
     "gradient_checkpointing": true,
     "compile_model": true,
@@ -38,21 +36,8 @@
   "accelerator": {
     "mixed_precision": "bf16"
   },
-  "peft": {
-    "method_type": "LORA",
-    "r": 32,
-    "lora_alpha": 64,
-    "target_modules": ".*\\.paligemma\\.model\\.language_model\\..*\\.self_attn\\.(q|v)_proj",
-    "full_training_modules": [
-      "model.paligemma_with_expert.gemma_expert",
-      "model.action_in_proj",
-      "model.action_out_proj",
-      "model.time_mlp_in",
-      "model.time_mlp_out"
-    ]
-  },
-  "output_dir": "outputs/pi05_relative_leyland_merged",
-  "job_name": "pi05_relative_leyland_merged",
+  "output_dir": "outputs/pi05_leyland_merged_500",
+  "job_name": "pi05_leyland_merged_500",
   "batch_size": 32,
   "num_workers": 8,
   "steps": 50000,
@@ -62,5 +47,6 @@
     "enable": true,
     "disable_artifact": true,
     "project": "pickplace"
+    
   }
 }

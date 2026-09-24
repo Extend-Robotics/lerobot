@@ -1,0 +1,58 @@
+{
+  "strategy": {
+    "type": "dagger",
+    "record_autonomous": false,
+    "num_episodes": 100,
+    "input_device": "keyboard"
+  },
+  "policy": {
+    "path": "/home/oleg/extend_lerobot/lerobot/outputs/pi05_leyland_merged/checkpoints/050000/pretrained_model/"
+  },
+  "inference": {
+    "type": "rtc",
+    "rtc": {
+      "mode": "trained",
+      "execution_horizon": 5
+    },
+    "queue_threshold": 15
+  },
+  "robot": {
+    "type": "so101_follower",
+    "port": "/dev/ttyACM0",
+    "id": "my_awesome_follower_arm",
+    "cameras": {
+      "front": {
+        "type": "opencv",
+        "index_or_path": "/dev/video2",
+        "width": 640,
+        "height": 480,
+        "fps": 30
+      },
+      "realsense": {
+        "type": "intelrealsense",
+        "serial_number_or_name": "108322073873",
+        "width": 1280,
+        "height": 720,
+        "fps": 30
+      }
+    }
+  },
+  "teleop": {
+    "type": "so101_leader",
+    "port": "/dev/ttyACM1",
+    "id": "my_awesome_leader_arm"
+  },
+  "dataset": {
+    "repo_id": "local/rollout_leyland_merged_corrections",
+    "root": "/home/oleg/extend_lerobot/lerobot/datasets/rollout_leyland_merged_corrections",
+    "push_to_hub": false,
+    "no_stamp": true,
+    "single_task": "Pick a fuse and install it on a jig",
+    "fps": 30,
+    "streaming_encoding": false,
+    "num_image_writer_threads_per_camera": 4
+  },
+  "fps": 30,
+  "device": "cuda",
+  "resume": true
+}
