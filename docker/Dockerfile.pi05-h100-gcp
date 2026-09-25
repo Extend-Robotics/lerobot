@@ -89,14 +89,18 @@ USER ${USER_ID}:${GROUP_ID}
 # extra provides datasets/Accelerate/W&B and "pi" provides the pi0/pi0.5 stack.
 COPY --chown=${USER_ID}:${GROUP_ID} pyproject.toml uv.lock setup.py README.md MANIFEST.in ./
 RUN uv sync --locked --no-dev --extra training --extra pi \
-        --no-install-project --no-cache \
-    && chmod +x .venv/lib/python${PYTHON_VERSION}/site-packages/triton/backends/nvidia/bin/ptxas
+        --no-install-project --no-cache
 
-# Only package source is copied. Local datasets, tokens, and training outputs must
+RUN chmod +x .venv/lib/python${PYTHON_VERSION}/site-packages/triton/backends/nvidia/bin/ptxas
+
+# Package source and configs are copied. Local datasets, tokens, and training outputs must
 # be supplied at runtime through /data or another mounted volume.
 COPY --chown=${USER_ID}:${GROUP_ID} src ./src
 RUN uv sync --locked --no-dev --extra training --extra pi --no-cache \
     && lerobot-info
+
+# Keep configs in a separate layer so config edits do not repeat dependency setup.
+COPY --chown=${USER_ID}:${GROUP_ID} configs ./configs
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/bin/bash"]
