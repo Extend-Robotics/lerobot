@@ -18,7 +18,7 @@ export REGION="europe-west2"
 export ZONE="europe-west2-b"
 export REPOSITORY="lerobot"
 export VM_NAME="pi05-h100"
-export MACHINE_TYPE="a3-highgpu-1g"
+export MACHINE_TYPE="a3-highgpu-8g"
 export VM_IMAGE_PROJECT="deeplearning-platform-release"
 export VM_IMAGE_FAMILY="common-cu129-ubuntu-2404-nvidia-580"
 export IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/pi05-h100:v1"
@@ -178,11 +178,14 @@ gcloud compute ssh "${VM_NAME}" \
   --project="${PROJECT_ID}" --zone="${ZONE}" \
   --command="sudo docker exec -d pi05-trainer bash -c '
     mkdir -p /data/logs
-    exec /opt/lerobot/.venv/bin/lerobot-train \
-      --config_path=/opt/lerobot/configs/pi05_leyland_merged.json \
+    exec /opt/lerobot/.venv/bin/accelerate launch \
+      --multi_gpu \
+      --num_processes=8 \
+      /opt/lerobot/.venv/bin/lerobot-train \
+      --config_path=/opt/lerobot/configs/pi05_cloud_leyland_merged.json \
       --dataset.root=/data/datasets/leyland_merged_500 \
-      --output_dir=/data/outputs/pi05_leyland_run1 \
-      > /data/logs/pi05_leyland_run1.log 2>&1
+      --output_dir=/data/outputs/pi05_leyland_run \
+      > /data/logs/pi05_leyland_run.log 2>&1
   '"
 ```
 
@@ -192,7 +195,7 @@ training later succeeds. Check the log:
 ```bash
 gcloud compute ssh "${VM_NAME}" \
   --project="${PROJECT_ID}" --zone="${ZONE}" \
-  --command='sudo docker exec pi05-trainer tail -n 100 -f /data/logs/pi05_leyland_run1.log'
+  --command='sudo docker exec pi05-trainer tail -n 100 -f /data/logs/pi05_leyland_run.log'
 ```
 
 Press Ctrl-C to stop following the log. Training continues after SSH disconnects.
