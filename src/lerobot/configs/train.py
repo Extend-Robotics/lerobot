@@ -122,6 +122,9 @@ class TrainPipelineConfig(HubMixin):
     # is to use the configuration from the checkpoint, regardless of what's provided with the training
     # command at the time of resumption (CLI `--*` flags still override).
     resume: bool = False
+    # False loads policy weights but builds fresh processors from the active config and dataset.
+    # Resuming always restores saved processors, including their normalization statistics.
+    load_pretrained_processors: bool = True
     # `seed` is used for training (eg: model initialization, dataset shuffling)
     # AND for the evaluation environments.
     seed: int | None = 1000

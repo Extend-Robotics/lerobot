@@ -139,6 +139,77 @@ def _preprocess_dataset_batch(
     return preprocessor(batch)
 
 
+def _make_training_processors(
+    cfg: TrainPipelineConfig, policy: PreTrainedPolicy, dataset: Any, device: torch.device
+) -> tuple[Any, Any]:
+    """Build fine-tuning processors or restore saved processors when resuming."""
+    active_cfg = cfg.trainable_config
+    processor_pretrained_path = active_cfg.pretrained_path
+    if not cfg.resume and (
+        not cfg.load_pretrained_processors or getattr(active_cfg, "recipe", None) is not None
+    ):
+        if processor_pretrained_path is not None and is_main_process():
+            logging.warning(
+                "Fine-tuning rebuilds processors from the active configuration and dataset statistics; "
+                "saved processors from %s will not be loaded.",
+                processor_pretrained_path,
+            )
+        processor_pretrained_path = None
+
+    processor_kwargs = ProcessorConfigKwargs()
+    processor_dataset_stats = rename_stats(dataset.meta.stats, cfg.rename_map)
+    if (processor_pretrained_path and not cfg.resume) or not processor_pretrained_path:
+        processor_kwargs["dataset_stats"] = processor_dataset_stats
+    if cfg.is_reward_model_training:
+        processor_kwargs["dataset_meta"] = dataset.meta
+    if not cfg.is_reward_model_training and processor_pretrained_path is not None:
+        preprocessor_overrides = {
+            "device_processor": {"device": device.type},
+            "normalizer_processor": {
+                "features": {**policy.config.input_features, **policy.config.output_features},
+                "norm_map": policy.config.normalization_mapping,
+            },
+            "rename_observations_processor": {"rename_map": cfg.rename_map},
+        }
+        postprocessor_overrides = {
+            "unnormalizer_processor": {
+                "features": policy.config.output_features,
+                "norm_map": policy.config.normalization_mapping,
+            },
+        }
+        # On resume, the checkpoint's saved processor stats are authoritative: they may have
+        # been adapted by the policy (e.g. EVO1 pads state/action stats to max_state_dim),
+        # and force-feeding raw dataset stats over them crashes normalization (#4006).
+        # This mirrors the `dataset_stats` kwarg above, which is also skipped on resume.
+        if not cfg.resume:
+            preprocessor_overrides["normalizer_processor"]["stats"] = processor_dataset_stats
+            postprocessor_overrides["unnormalizer_processor"]["stats"] = processor_dataset_stats
+        if getattr(active_cfg, "use_relative_actions", False):
+            preprocessor_overrides["relative_actions_processor"] = {
+                "enabled": True,
+                "exclude_joints": getattr(active_cfg, "relative_exclude_joints", []),
+                "action_names": getattr(active_cfg, "action_feature_names", None),
+            }
+            postprocessor_overrides["absolute_actions_processor"] = {"enabled": True}
+        processor_kwargs["preprocessor_overrides"] = preprocessor_overrides
+        processor_kwargs["postprocessor_overrides"] = postprocessor_overrides
+
+    if cfg.is_reward_model_training:
+        preprocessor, postprocessor = make_reward_pre_post_processors(
+            cfg.reward_model,
+            **processor_kwargs,
+        )
+    else:
+        preprocessor, postprocessor = make_pre_post_processors(
+            policy_cfg=cfg.policy,
+            pretrained_path=processor_pretrained_path,
+            pretrained_revision=getattr(cfg.policy, "pretrained_revision", None),
+            **processor_kwargs,
+        )
+
+    return preprocessor, postprocessor
+
+
 def update_policy(
     train_metrics: MetricsTracker,
     policy: PreTrainedPolicy,
@@ -515,69 +586,8 @@ def train(cfg: TrainPipelineConfig):
 
     accelerator.wait_for_everyone()
 
-    # --- processors (overrides built once, as one typed mapping) -------------------------------
     active_cfg = cfg.trainable_config
-    processor_pretrained_path = active_cfg.pretrained_path
-    if not cfg.resume and getattr(active_cfg, "recipe", None) is not None:
-        if processor_pretrained_path is not None and is_main_process():
-            logging.warning(
-                "Language recipe fine-tuning rebuilds processors from the active configuration; "
-                "saved processors from %s will not be loaded.",
-                processor_pretrained_path,
-            )
-        # Language fine-tuning must use the active recipe, not the saved processor recipe.
-        processor_pretrained_path = None
-
-    processor_kwargs = ProcessorConfigKwargs()
-    processor_dataset_stats = rename_stats(dataset.meta.stats, cfg.rename_map)
-    if (processor_pretrained_path and not cfg.resume) or not processor_pretrained_path:
-        processor_kwargs["dataset_stats"] = processor_dataset_stats
-    if cfg.is_reward_model_training:
-        processor_kwargs["dataset_meta"] = dataset.meta
-    if not cfg.is_reward_model_training and processor_pretrained_path is not None:
-        preprocessor_overrides = {
-            "device_processor": {"device": device.type},
-            "normalizer_processor": {
-                "features": {**policy.config.input_features, **policy.config.output_features},
-                "norm_map": policy.config.normalization_mapping,
-            },
-            "rename_observations_processor": {"rename_map": cfg.rename_map},
-        }
-        postprocessor_overrides = {
-            "unnormalizer_processor": {
-                "features": policy.config.output_features,
-                "norm_map": policy.config.normalization_mapping,
-            },
-        }
-        # On resume, the checkpoint's saved processor stats are authoritative: they may have
-        # been adapted by the policy (e.g. EVO1 pads state/action stats to max_state_dim),
-        # and force-feeding raw dataset stats over them crashes normalization (#4006).
-        # This mirrors the `dataset_stats` kwarg above, which is also skipped on resume.
-        if not cfg.resume:
-            preprocessor_overrides["normalizer_processor"]["stats"] = processor_dataset_stats
-            postprocessor_overrides["unnormalizer_processor"]["stats"] = processor_dataset_stats
-        if getattr(active_cfg, "use_relative_actions", False):
-            preprocessor_overrides["relative_actions_processor"] = {
-                "enabled": True,
-                "exclude_joints": getattr(active_cfg, "relative_exclude_joints", []),
-                "action_names": getattr(active_cfg, "action_feature_names", None),
-            }
-            postprocessor_overrides["absolute_actions_processor"] = {"enabled": True}
-        processor_kwargs["preprocessor_overrides"] = preprocessor_overrides
-        processor_kwargs["postprocessor_overrides"] = postprocessor_overrides
-
-    if cfg.is_reward_model_training:
-        preprocessor, postprocessor = make_reward_pre_post_processors(
-            cfg.reward_model,
-            **processor_kwargs,
-        )
-    else:
-        preprocessor, postprocessor = make_pre_post_processors(
-            policy_cfg=cfg.policy,
-            pretrained_path=processor_pretrained_path,
-            pretrained_revision=getattr(cfg.policy, "pretrained_revision", None),
-            **processor_kwargs,
-        )
+    preprocessor, postprocessor = _make_training_processors(cfg, policy, dataset, device)
 
     # Created BEFORE prepare on the unsharded parameters — accelerate's FSDP2 path requires the
     # model and optimizer in one prepare() call and rebinds the param groups itself.
