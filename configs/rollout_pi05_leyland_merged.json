@@ -1,9 +1,6 @@
 {
   "strategy": {
-    "type": "dagger",
-    "record_autonomous": false,
-    "num_episodes": 100,
-    "input_device": "keyboard"
+    "type": "episodic"
   },
   "policy": {
     "path": "/home/oleg/extend_lerobot/pretrained_model_50k/pretrained_model"
@@ -43,14 +40,16 @@
     "id": "my_awesome_leader_arm"
   },
   "dataset": {
-    "repo_id": "local/rollout_leyland_merged_500_corrections",
-    "root": "/home/oleg/extend_lerobot/lerobot/datasets/rollout_leyland_merged_500_corrections",
+    "repo_id": "local/rollout_leyland_merged_500",
+    "root": "/home/oleg/extend_lerobot/lerobot/datasets/rollout_leyland_merged_500",
     "push_to_hub": false,
     "no_stamp": true,
     "single_task": "Pick a fuse and install it on a jig",
+    "num_episodes": 100,
     "fps": 30,
-    "streaming_encoding": false,
-    "num_image_writer_threads_per_camera": 4
+    "streaming_encoding": true,
+    "episode_time_s": 15,
+    "encoder_threads": 2
   },
   "fps": 30,
   "device": "cuda"
