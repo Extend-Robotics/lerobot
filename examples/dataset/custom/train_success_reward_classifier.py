@@ -15,10 +15,12 @@
 # limitations under the License.
 
 from argparse import ArgumentParser, Namespace
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+import wandb
 from torch import Tensor
 from torch.utils.data import DataLoader
 
@@ -38,14 +40,13 @@ MODEL_NAME = "lerobot/resnet10"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 BATCH_SIZE = 256
 NUM_WORKERS = 0
-STEPS = 200
-LEARNING_RATE = 1e-4
+STEPS = 5000
+LEARNING_RATE = 5e-5
 LOG_FREQ = 1
-VAL_FREQ = 100
+VAL_FREQ = 25
 VAL_FRACTION = 0.1
 SPLIT_SEED = 0
 LABEL_WEIGHTS = {0: 1.0, 1: 10.0}
-
 
 def parse_args() -> Namespace:
     parser = ArgumentParser(description="Train a classifier on a dataset with success reward labels.")
@@ -72,6 +73,15 @@ def parse_args() -> Namespace:
             "output/lerobot_<dataset-name>_with_success_reward."
         ),
     )
+    parser.add_argument(
+        "--wandb-mode",
+        choices=("online", "offline", "disabled"),
+        default="online",
+        help="W&B logging mode (default: disabled). Use online to sync or offline to log locally.",
+    )
+    parser.add_argument("--wandb-project", default="lerobot", help="W&B project name.")
+    parser.add_argument("--wandb-entity", default=None, help="W&B team or user name.")
+    parser.add_argument("--wandb-name", default=None, help="Optional W&B run name.")
     return parser.parse_args()
 
 
@@ -93,7 +103,7 @@ def output_dir_from_dataset_name(dataset_name: str) -> Path:
 
 
 def classifier_output_dir_from_dataset_root(dataset_root: Path) -> Path:
-    return REPO_ROOT / "output" / f"{dataset_root.name}_classifier"
+    return REPO_ROOT / "outputs" / f"{dataset_root.name}_classifier"
 
 
 def label_key(label: float) -> int | float:
@@ -369,51 +379,102 @@ def main():
     )
     optimizer = torch.optim.Adam(model.get_optim_params(), lr=LEARNING_RATE)
 
-    step = 0
-    while step < STEPS:
-        for batch in train_dataloader:
-            batch = prepare_batch(batch, image_keys)
-            predictions, losses, labels, _ = compute_batch_predictions_and_loss(
-                model,
-                batch,
-                LABEL_WEIGHTS,
-            )
-            loss = losses.mean()
-            correct = (predictions == labels).sum().item()
-            total = labels.size(0)
-            metrics = {
-                "accuracy": 100 * correct / total,
-                "correct": correct,
-                "total": total,
-            }
-
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
-
-            step += 1
-            if step % LOG_FREQ == 0 or step == 1:
-                print(
-                    f"step={step} loss={loss.item():.4f} "
-                    f"accuracy={metrics['accuracy']:.2f} "
-                    f"correct={metrics['correct']}/{metrics['total']}"
-                )
-
-            if step % VAL_FREQ == 0 or step == STEPS:
-                val_metrics = validate(model, val_dataloader, image_keys)
-                print(
-                    f"validation step={step} loss={val_metrics['loss']:.4f} "
-                    f"accuracy={val_metrics['accuracy']:.2f} "
-                    f"correct={val_metrics['correct']}/{val_metrics['total']}"
-                )
-                print(f"validation by label: {format_eval_label_stats(val_metrics['by_label'])}")
-
-            if step >= STEPS:
-                break
-
     output_dir.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(output_dir)
-    print(f"Saved reward classifier to {output_dir}")
+    run_context = (
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_name,
+            mode=args.wandb_mode,
+            dir=str(output_dir),
+            config={
+                "dataset_repo_id": dataset_repo_id,
+                "dataset_root": str(dataset_root),
+                "output_dir": str(output_dir),
+                "model_name": MODEL_NAME,
+                "image_keys": list(image_keys),
+                "image_size": list(IMAGE_SIZE),
+                "device": DEVICE,
+                "batch_size": BATCH_SIZE,
+                "num_workers": NUM_WORKERS,
+                "steps": STEPS,
+                "learning_rate": LEARNING_RATE,
+                "log_freq": LOG_FREQ,
+                "val_freq": VAL_FREQ,
+                "val_fraction": VAL_FRACTION,
+                "split_seed": SPLIT_SEED,
+                "label_weights": LABEL_WEIGHTS,
+                "train_episodes": train_episodes,
+                "val_episodes": val_episodes,
+                "train_frames": len(train_dataset),
+                "val_frames": len(val_dataset),
+            },
+        )
+        if args.wandb_mode != "disabled"
+        else nullcontext()
+    )
+    with run_context as run:
+        step = 0
+        while step < STEPS:
+            for batch in train_dataloader:
+                batch = prepare_batch(batch, image_keys)
+                predictions, losses, labels, _ = compute_batch_predictions_and_loss(
+                    model,
+                    batch,
+                    LABEL_WEIGHTS,
+                )
+                loss = losses.mean()
+                correct = (predictions == labels).sum().item()
+                total = labels.size(0)
+                metrics = {
+                    "accuracy": 100 * correct / total,
+                    "correct": correct,
+                    "total": total,
+                }
+
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                optimizer.step()
+
+                step += 1
+                log_metrics = {}
+                if step % LOG_FREQ == 0 or step == 1:
+                    print(
+                        f"step={step} loss={loss.item():.4f} "
+                        f"accuracy={metrics['accuracy']:.2f} "
+                        f"correct={metrics['correct']}/{metrics['total']}"
+                    )
+
+                    log_metrics.update({f"train/{key}": value for key, value in metrics.items()})
+                    log_metrics["train/loss"] = loss.item()
+                    log_metrics["train/learning_rate"] = optimizer.param_groups[0]["lr"]
+
+                if step % VAL_FREQ == 0 or step == STEPS:
+                    val_metrics = validate(model, val_dataloader, image_keys)
+                    print(
+                        f"validation step={step} loss={val_metrics['loss']:.4f} "
+                        f"accuracy={val_metrics['accuracy']:.2f} "
+                        f"correct={val_metrics['correct']}/{val_metrics['total']}"
+                    )
+                    print(f"validation by label: {format_eval_label_stats(val_metrics['by_label'])}")
+
+                    log_metrics.update(
+                        {f"val/{key}": value for key, value in val_metrics.items() if key != "by_label"}
+                    )
+                    for label, stats in val_metrics["by_label"].items():
+                        log_metrics.update(
+                            {f"val/label_{label}/{key}": value for key, value in stats.items()}
+                        )
+
+                if run is not None and log_metrics:
+                    # Send train and validation metrics together so neither is dropped at the same step.
+                    run.log(log_metrics, step=step)
+
+                if step >= STEPS:
+                    break
+
+        model.save_pretrained(output_dir)
+        print(f"Saved reward classifier to {output_dir}")
 
 
 if __name__ == "__main__":

@@ -134,3 +134,33 @@ uv run python examples/dataset/custom/create_success_reward_video.py \
     --output-path output/reward_probability_episode_000003.mp4 \
     --device auto
 ```
+
+## Mixed-success local rollouts
+
+`annotate_rollout_success_reward.py` inspects local v3 data and writes
+`episodes.csv`, `successful_episodes.csv`, `unsuccessful_episodes.csv`, and
+`summary.csv` under `outputs/rollout_leyland_merged_500_episode_success` by default:
+
+```bash
+uv run python examples/dataset/custom/annotate_rollout_success_reward.py
+uv run python examples/dataset/custom/annotate_rollout_success_reward.py --annotate
+```
+
+For this dataset, the observed timeout cluster is 445–446 frames at 30 FPS
+(14.83–14.87 seconds). The default `--failure-min-frames 445` classifies 38
+of 100 episodes as unsuccessful; 62 shorter episodes are inferred successful.
+These are duration-based labels, not visually verified outcomes. Use
+`--failure-min-frames` to change the cutoff. Durations are `length / fps`;
+the CSV also contains actual first and last sample timestamps.
+
+Annotation writes a new sibling dataset ending in `_with_success_reward`.
+It gives the last `--num-reward-samples` frames (default 5) of successful
+episodes `next.reward = 1`; all remaining frames, including every frame of
+unsuccessful episodes, receive zero. Existing output directories are rejected.
+Use `--dataset-root`, `--report-dir`, and `--output-dir` to customize paths.
+
+Inspection found 423 stale episode-21 rows in `data/chunk-000/file-000.parquet`.
+The metadata designates episode 21 in `file-001.parquet` with 314 frames.
+The script validates and copies only metadata-designated frame ranges into
+the annotated dataset and records stale row counts in the CSV. Source files
+are preserved. The resulting copy has 35,627 frames and 310 positive rewards.

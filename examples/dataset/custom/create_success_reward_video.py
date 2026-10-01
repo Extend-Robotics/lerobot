@@ -25,9 +25,10 @@ Usage:
     uv run python examples/dataset/custom/create_success_reward_video.py
 
     uv run python examples/dataset/custom/create_success_reward_video.py \
-        HuggingFaceVLA/smol-libero \
-        --episode 3 \
-        --camera-key observation.images.image2
+        --dataset-repo-id=local/rollout_leyland_merged_500 \
+        --dataset-root=/home/oleg/extend_lerobot/lerobot/datasets/rollout_leyland_merged_500 \
+        --model-dir=/home/oleg/extend_lerobot/lerobot/outputs/leyland_merged_500_with_success_reward_classifier \
+        --episode=3 
 """
 
 from __future__ import annotations
