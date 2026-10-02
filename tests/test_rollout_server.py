@@ -3,6 +3,7 @@
 import time
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -22,7 +23,7 @@ from tests.test_rollout import _LOOP_FEATURES, _make_loop_ctx  # noqa: E402
 
 
 @pytest.fixture
-def session(tmp_path, monkeypatch):
+def session(tmp_path, monkeypatch, request):
     cfg_strategy = DAggerStrategyConfig(num_episodes=1, smooth_handover=False)
     strategy = DAggerStrategy(cfg_strategy)
     started = Event()
@@ -45,6 +46,18 @@ def session(tmp_path, monkeypatch):
     cfg = ctx.runtime.cfg
     cfg.strategy = cfg_strategy
     cfg.interactive = False
+    display_mode = getattr(request, "param", None)
+    cfg.display_data = display_mode is not None
+    cfg.display_mode = display_mode or "rerun"
+    cfg.display_ip = "127.0.0.1"
+    cfg.display_port = 8765
+    cfg.display_compressed_images = True
+    init_display = MagicMock()
+    close_display = MagicMock()
+    telemetry = MagicMock()
+    monkeypatch.setattr(server, "init_visualization", init_display)
+    monkeypatch.setattr(server, "shutdown_visualization", close_display)
+    monkeypatch.setattr("lerobot.rollout.strategies.core.log_visualization_data", telemetry)
     cfg.autosteer_interval_s = 0
     cfg.dataset.streaming_encoding = False
     cfg.dataset.push_to_hub = False
@@ -53,6 +66,9 @@ def session(tmp_path, monkeypatch):
     engine.task = "launch task"
     engine.set_task.side_effect = lambda task: setattr(engine, "task", task) or True
     engine.resume.side_effect = resume
+    ctx.hardware.initial_position = {"m.pos": 0.0}
+    # Exercise the real return interpolation without its three-second delay.
+    monkeypatch.setattr("lerobot.rollout.strategies.core.precise_sleep", lambda _: None)
     ctx.hardware.teleop.feedback_features = {}
     ctx.hardware.teleop.get_action.return_value = {"m.pos": 42.0}
     features = {**_LOOP_FEATURES, **cfg_strategy.extra_dataset_features()}
@@ -61,17 +77,41 @@ def session(tmp_path, monkeypatch):
     ctx.data.dataset_features = features
 
     def build(_cfg, shutdown):
+        if cfg.display_data:
+            init_display.assert_called_once_with(
+                cfg.display_mode, session_name="rollout", ip="127.0.0.1", port=8765
+            )
         ctx.runtime.shutdown_event = shutdown
         return ctx
 
     monkeypatch.setattr(server, "build_rollout_context", build)
     monkeypatch.setattr(server, "create_strategy", lambda _: strategy)
     monkeypatch.setattr("lerobot.rollout.strategies.dagger._init_dagger_keyboard", lambda *_: None)
+    return_home = MagicMock(wraps=strategy.return_to_initial_position)
+    monkeypatch.setattr(strategy, "return_to_initial_position", return_home)
     with TestClient(server.create_app(cfg)) as client:
         yield client, ctx, dataset, started
+        returns_before_teardown = return_home.call_count
+
+        def check_disconnect_order():
+            if ctx.hardware.initial_position:
+                assert return_home.call_count == returns_before_teardown + 1
+
+        ctx.hardware.robot_wrapper.inner.disconnect.side_effect = check_disconnect_order
+    if ctx.hardware.initial_position:
+        assert return_home.call_count == returns_before_teardown + 1
     assert dataset._is_finalized
     engine.stop.assert_called_once()
     ctx.hardware.robot_wrapper.inner.disconnect.assert_called_once()
+    if cfg.display_data:
+        close_display.assert_called_once_with(cfg.display_mode)
+        assert telemetry.call_count > 0
+        assert all(call.args[0] == cfg.display_mode for call in telemetry.call_args_list)
+        assert all(call.kwargs["compress_images"] for call in telemetry.call_args_list)
+    else:
+        init_display.assert_not_called()
+        close_display.assert_not_called()
+        telemetry.assert_not_called()
 
 
 def test_timed_episodes_keep_session_connected(session):
@@ -85,12 +125,13 @@ def test_timed_episodes_keep_session_connected(session):
         assert response.status_code == 200, response.text
         assert response.json() == {"status": "done"}
         assert time.monotonic() - start >= 0.08
-        assert engine.task == task
+        assert engine.task == "launch task"
+        assert ctx.hardware.robot_wrapper.send_action.call_args.args[0] == ctx.hardware.initial_position
         assert dataset.num_episodes == index
         assert not dataset._is_finalized
         ctx.hardware.robot_wrapper.inner.disconnect.assert_not_called()
     assert dataset.meta.tasks.index.tolist() == ["first task", "second task"]
-    assert ctx.runtime.cfg.return_to_initial_position is False
+    assert ctx.runtime.cfg.return_to_initial_position is True
 
 
 def test_overlapping_episode_is_rejected(session):
@@ -206,3 +247,78 @@ def test_programmatic_shutdown_stops_rollout_before_draining_requests(session, m
             asyncio.run(http_server.shutdown())
         finally:
             shutdown_event.set()
+
+
+@pytest.mark.parametrize("session", ["foxglove", "rerun"], indirect=True)
+def test_display_enabled_across_episodes(session):
+    client, ctx, dataset, _ = session
+    ctx.policy.inference.resume.assert_not_called()
+    for task in ("first", "second"):
+        response = client.post("/episode", json={"task": task, "timeout_s": 0.08})
+        assert response.status_code == 200, response.text
+        assert response.json() == {"status": "done"}
+    assert dataset.num_episodes == 2
+
+
+def test_visualization_closes_when_context_startup_fails(monkeypatch):
+    ctx, _ = _make_loop_ctx(200, 1, 1)
+    cfg = ctx.runtime.cfg
+    cfg.strategy = DAggerStrategyConfig()
+    cfg.interactive = False
+    cfg.display_data = True
+    cfg.display_mode = "foxglove"
+    init_display = MagicMock()
+    close_display = MagicMock()
+    monkeypatch.setattr(server, "init_visualization", init_display)
+    monkeypatch.setattr(server, "shutdown_visualization", close_display)
+    monkeypatch.setattr(server, "build_rollout_context", MagicMock(side_effect=RuntimeError("setup failed")))
+    with pytest.raises(RuntimeError, match="setup failed"), TestClient(server.create_app(cfg)):
+        pass
+    init_display.assert_called_once()
+    close_display.assert_called_once_with("foxglove")
+
+
+@pytest.mark.parametrize("reset_failure", ["failed", "skipped"])
+def test_unsuccessful_return_does_not_report_done(session, reset_failure):
+    client, ctx, _, _ = session
+    # A previous successful reset must not mask this request's result.
+    assert client.post("/episode", json={"task": "first", "timeout_s": 0.08}).status_code == 200
+    if reset_failure == "skipped":
+        ctx.hardware.initial_position = None
+    else:
+        send_action = ctx.hardware.robot_wrapper.send_action
+
+        def fail_on_return(action):
+            if ctx.policy.inference.task == "launch task":
+                raise RuntimeError("return motor failure")
+            return action
+
+        send_action.side_effect = fail_on_return
+    response = client.post("/episode", json={"task": "second", "timeout_s": 0.08})
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Could not return to the initial position"
+
+
+@pytest.mark.parametrize("shutdown_during_reset", [False, True])
+def test_request_waits_and_rejects_overlap_during_return(session, monkeypatch, shutdown_during_reset):
+    client, ctx, _, _ = session
+    resetting = Event()
+    release = Event()
+
+    def wait_during_return(_duration):
+        resetting.set()
+        assert release.wait(3)
+
+    monkeypatch.setattr("lerobot.rollout.strategies.core.precise_sleep", wait_during_return)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(client.post, "/episode", json={"task": "first", "timeout_s": 0.08})
+        try:
+            assert resetting.wait(2)
+            assert not pending.done()
+            assert client.post("/episode", json={"task": "second", "timeout_s": 0.08}).status_code == 409
+            if shutdown_during_reset:
+                ctx.runtime.shutdown_event.parent.set()
+        finally:
+            release.set()
+        response = pending.result(timeout=3)
+        assert response.status_code == (503 if shutdown_during_reset else 200)

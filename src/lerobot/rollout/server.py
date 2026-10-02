@@ -1,11 +1,12 @@
 """A single-robot API: run a corrections-only DAgger episode until its timeout."""
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from threading import Event, Lock, Thread
 from typing import Annotated
 
 from lerobot.utils.import_utils import require_package
+from lerobot.utils.visualization_utils import init_visualization, shutdown_visualization
 
 require_package("fastapi", "rollout-server")
 require_package("uvicorn", "rollout-server")
@@ -44,13 +45,14 @@ class EpisodeRequest(BaseModel):
 def create_app(cfg: RolloutConfig, shutdown_event: Event | None = None) -> FastAPI:
     if not isinstance(cfg.strategy, DAggerStrategyConfig) or cfg.strategy.record_autonomous:
         raise ValueError("The API requires corrections-only DAgger")
-    if cfg.interactive or cfg.display_data:
-        raise ValueError("The API requires interactive=false and display_data=false")
+    if cfg.interactive:
+        raise ValueError("The API requires interactive=false")
 
     # HTTP timeout owns the segment length, not the number of pilot corrections.
     cfg.strategy.num_episodes = 2**63 - 1
-    cfg.return_to_initial_position = False
+    cfg.return_to_initial_position = True
     finished = Event()
+    completion_event = None
     episode_lock = Lock()
     controller = None
     strategy = None
@@ -58,39 +60,61 @@ def create_app(cfg: RolloutConfig, shutdown_event: Event | None = None) -> FastA
         shutdown_event = Event()
 
     def on_event(event, _payload):
-        if event in (RolloutEvent.SEGMENT_ENDED, RolloutEvent.STOPPED):
-            finished.set()
+        nonlocal completion_event
+        if event is RolloutEvent.SEGMENT_ENDED:
+            if strategy.timed_out and not shutdown_event.is_set() and not controller.failed:
+                # Queue the move on the controller thread; reset() does not wait for it.
+                # Its return value describes task restoration, not reset success.
+                controller.reset()
+                return
+        elif event not in (
+            RolloutEvent.RESET_DONE,
+            RolloutEvent.RESET_FAILED,
+            RolloutEvent.RESET_SKIPPED,
+            RolloutEvent.STOPPED,
+        ):
+            return
+        completion_event = event
+        finished.set()
 
     @asynccontextmanager
     async def lifespan(_app):
         nonlocal controller, strategy
-        ctx = build_rollout_context(cfg, LinkedEvent(shutdown_event))
-        strategy = create_strategy(cfg.strategy)
-        thread = None
-        try:
-            strategy.setup(ctx)
-            ctx.policy.inference.pause()
-            controller = RolloutController(strategy, ctx, on_event=on_event)
-            thread = Thread(target=controller.serve, name="rollout-controller")
-            thread.start()
-            yield
-        finally:
-            if controller is not None:
-                controller.stop()
-            if thread is not None:
-                await asyncio.to_thread(thread.join)
-            strategy.teardown(ctx)
+        with ExitStack() as cleanup:
+            if cfg.display_data:
+                init_visualization(
+                    cfg.display_mode, session_name="rollout", ip=cfg.display_ip, port=cfg.display_port
+                )
+                cleanup.callback(shutdown_visualization, cfg.display_mode)
+            ctx = build_rollout_context(cfg, LinkedEvent(shutdown_event))
+            strategy = create_strategy(cfg.strategy)
+            cleanup.callback(strategy.teardown, ctx)
+            thread = None
+            try:
+                strategy.setup(ctx)
+                ctx.policy.inference.pause()
+                controller = RolloutController(strategy, ctx, on_event=on_event)
+                thread = Thread(target=controller.serve, name="rollout-controller")
+                thread.start()
+                yield
+            finally:
+                if controller is not None:
+                    controller.stop()
+                if thread is not None:
+                    await asyncio.to_thread(thread.join)
 
     app = FastAPI(lifespan=lifespan)
 
     @app.post("/episode")
     def episode(request: EpisodeRequest):
+        nonlocal completion_event
         if not episode_lock.acquire(blocking=False):
             raise HTTPException(409, "An episode is already running")
         try:
             if shutdown_event.is_set() or controller is None or controller.stopped or controller.failed:
                 raise HTTPException(503, "Rollout session is unavailable")
             finished.clear()
+            completion_event = None
             cfg.duration = request.timeout_s
             controller.set_task(request.task)
             if not controller.start():
@@ -98,6 +122,8 @@ def create_app(cfg: RolloutConfig, shutdown_event: Event | None = None) -> FastA
             finished.wait()
             if shutdown_event.is_set() or controller.failed or controller.stopped or not strategy.timed_out:
                 raise HTTPException(503, "Episode interrupted before completion")
+            if completion_event is not RolloutEvent.RESET_DONE:
+                raise HTTPException(503, "Could not return to the initial position")
             return {"status": "done"}
         finally:
             episode_lock.release()

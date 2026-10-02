@@ -521,8 +521,8 @@ uv run --no-sync lerobot-rollout-server \
 ```
 
 The server accepts the usual rollout configuration plus `--host` (default `127.0.0.1`)
-and `--port` (default `8000`). Use corrections-only DAgger, with `interactive=false`
-and `display_data=false`. Hardware connects once and inference stays paused until a request:
+and `--port` (default `8000`). Use corrections-only DAgger with `interactive=false`.
+Hardware connects once and inference stays paused until a request:
 
 ```bash
 curl http://127.0.0.1:8000/episode \
@@ -539,3 +539,20 @@ The robot stays connected and the policy pauses between requests. This server do
 not home the robot or run a success classifier. It ignores the configured correction
 count and uses the request timeout instead. Only one episode runs at a time (`409`
 for overlaps); interrupted or failed execution returns `503`, and invalid input `422`.
+
+
+For live visualization, install the `viz` extra and add the usual display flags:
+
+```bash
+--display_data=true \
+--display_mode=foxglove \
+--display_ip=127.0.0.1 \
+--display_port=8765 \
+--display_compressed_images=true
+```
+
+Visualization starts once with the API server and closes at shutdown. Both
+Foxglove and Rerun (`--display_mode=rerun`) are supported. Telemetry is published
+during autonomous execution and pilot corrections, not while paused or idle
+between requests. For remote access, forward both API port `8000` and Foxglove
+port `8765` through SSH and connect Foxglove to `ws://localhost:8765`.
