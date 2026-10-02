@@ -161,6 +161,7 @@ class DAggerEvents:
             self._phase = DAggerPhase.AUTONOMOUS
             self._pending_transition = None
         self.upload_requested.clear()
+        self.stop_recording.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +253,9 @@ class DAggerStrategy(RolloutStrategy):
         self._pending_push: Future | None = None
         self._needs_push = Event()
         self._episode_lock = Lock()
+        self._dataset_poisoned = False
+        # Last corrections-only run reached its duration limit before saving/cleanup.
+        self.timed_out = False
 
     def setup(self, ctx: RolloutContext) -> None:
         """Initialise the inference engine and input device listener."""
@@ -288,8 +292,15 @@ class DAggerStrategy(RolloutStrategy):
             self._episode_duration_s,
         )
 
+    def reset_control_state(self) -> None:
+        self.timed_out = False
+        super().reset_control_state()
+        self._events.reset()
+
     def run(self, ctx: RolloutContext) -> None:
         """Run DAgger episodes with human-in-the-loop intervention."""
+        if self._dataset_poisoned:
+            raise RuntimeError("Cannot restart DAgger after a dataset save failure")
         if self.config.record_autonomous:
             self._run_continuous(ctx)
         else:
@@ -311,23 +322,33 @@ class DAggerStrategy(RolloutStrategy):
             self._push_executor.shutdown(wait=True)
             self._push_executor = None
 
-        if ctx.data.dataset is not None:
-            logger.info("Finalizing dataset...")
-            ctx.data.dataset.finalize()
-            if self._needs_push.is_set() and ctx.runtime.cfg.dataset and ctx.runtime.cfg.dataset.push_to_hub:
-                logger.info("Pushing final dataset to hub...")
-                if safe_push_to_hub(
-                    ctx.data.dataset,
-                    tags=ctx.runtime.cfg.dataset.tags,
-                    private=ctx.runtime.cfg.dataset.private,
+        try:
+            if ctx.data.dataset is not None:
+                logger.info("Finalizing dataset...")
+                # Entry is a no-op; exit finalizes writers and cleans empty image directories.
+                # Keep this at session teardown so controller segments can share the writer.
+                with VideoEncodingManager(ctx.data.dataset):
+                    pass
+                if (
+                    not self._dataset_poisoned
+                    and self._needs_push.is_set()
+                    and ctx.runtime.cfg.dataset
+                    and ctx.runtime.cfg.dataset.push_to_hub
                 ):
-                    logger.info("Dataset uploaded to hub")
-                    log_say("Dataset uploaded to hub", play_sounds)
+                    logger.info("Pushing final dataset to hub...")
+                    if safe_push_to_hub(
+                        ctx.data.dataset,
+                        tags=ctx.runtime.cfg.dataset.tags,
+                        private=ctx.runtime.cfg.dataset.private,
+                    ):
+                        logger.info("Dataset uploaded to hub")
+                        log_say("Dataset uploaded to hub", play_sounds)
 
-        self._teardown_hardware(
-            ctx.hardware,
-            return_to_initial_position=ctx.runtime.cfg.return_to_initial_position,
-        )
+        finally:
+            self._teardown_hardware(
+                ctx.hardware,
+                return_to_initial_position=ctx.runtime.cfg.return_to_initial_position,
+            )
         logger.info("DAgger strategy teardown complete")
 
     # ------------------------------------------------------------------
@@ -518,6 +539,9 @@ class DAggerStrategy(RolloutStrategy):
         pauses and starts a correction, frames are recorded with
         ``intervention=True``.  Stopping the correction saves the episode.
         The dataset can be uploaded on demand via the upload key/pedal.
+        Runs are restartable: nonempty partial corrections are saved on exit,
+        and dataset finalization belongs to teardown. The correction target
+        applies separately to each run.
         """
         engine = self._engine
         cfg = ctx.runtime.cfg
@@ -530,149 +554,158 @@ class DAggerStrategy(RolloutStrategy):
 
         timer = CycleTimer(cfg.fps, interpolator.multiplier)
         correction_stride = interpolator.multiplier
-        task_str = cfg.dataset.single_task if cfg.dataset else cfg.task
         play_sounds = cfg.play_sounds
 
-        engine.reset()
-        interpolator.reset()
-        events.reset()
+        self.reset_control_state()
         engine.resume()
 
         last_action: dict[str, Any] | None = None
         start_time = time.perf_counter()
         correction_tick = 0
+        correction_task = engine.task
         recorded = 0
         logger.info(
             "DAgger corrections-only recording started (target: %d episodes)", self.config.num_episodes
         )
 
-        with VideoEncodingManager(dataset):
-            try:
-                while (
-                    recorded < self.config.num_episodes
-                    and not events.stop_recording.is_set()
-                    and not ctx.runtime.shutdown_event.is_set()
-                ):
-                    timer.tick(new_cycle=interpolator.needs_new_action())
+        try:
+            while (
+                recorded < self.config.num_episodes
+                and not events.stop_recording.is_set()
+                and not ctx.runtime.shutdown_event.is_set()
+            ):
+                timer.tick(new_cycle=interpolator.needs_new_action())
 
-                    if cfg.duration > 0 and (time.perf_counter() - start_time) >= cfg.duration:
-                        logger.info("Duration limit reached (%.0fs)", cfg.duration)
-                        break
+                if cfg.duration > 0 and (time.perf_counter() - start_time) >= cfg.duration:
+                    self.timed_out = True
+                    logger.info("Duration limit reached (%.0fs)", cfg.duration)
+                    break
 
-                    # Process transitions
-                    transition = events.consume_transition()
-                    if transition is not None:
-                        old_phase, new_phase = transition
-                        self._apply_transition(
-                            old_phase,
-                            new_phase,
-                            engine,
-                            interpolator,
-                            ctx,
-                            last_action,
-                            timer,
-                        )
-                        if new_phase == DAggerPhase.AUTONOMOUS:
-                            last_action = None
-                        elif new_phase == DAggerPhase.CORRECTING:
-                            # Every intervention opens with a recorded frame and
-                            # then records every ``multiplier``-th tick, so each
-                            # correction episode holds ``fps`` frames per second
-                            # whatever the phase the autonomous run left behind.
-                            correction_tick = 0
+                # Process transitions
+                transition = events.consume_transition()
+                if transition is not None:
+                    old_phase, new_phase = transition
+                    self._apply_transition(
+                        old_phase,
+                        new_phase,
+                        engine,
+                        interpolator,
+                        ctx,
+                        last_action,
+                        timer,
+                    )
+                    if new_phase == DAggerPhase.AUTONOMOUS:
+                        last_action = None
+                    elif new_phase == DAggerPhase.CORRECTING:
+                        # Every intervention opens with a recorded frame and
+                        # then records every ``multiplier``-th tick, so each
+                        # correction episode holds ``fps`` frames per second
+                        # whatever the phase the autonomous run left behind.
+                        correction_tick = 0
+                        correction_task = engine.task
 
-                        # Correction ended -> save episode (blocking if not streaming)
-                        if old_phase == DAggerPhase.CORRECTING and new_phase == DAggerPhase.PAUSED:
-                            with self._episode_lock:
-                                dataset.save_episode()
+                    # Correction ended -> save episode (blocking if not streaming)
+                    if old_phase == DAggerPhase.CORRECTING and new_phase == DAggerPhase.PAUSED:
+                        if self._save_correction(dataset):
                             recorded += 1
-                            self._needs_push.set()
-                            logger.info(
-                                "Correction %d/%d saved",
-                                recorded,
-                                self.config.num_episodes,
+                        logger.info(
+                            "Correction %d/%d saved",
+                            recorded,
+                            self.config.num_episodes,
+                        )
+                        log_say(f"Correction {recorded} saved", play_sounds)
+                        # ``save_episode`` blocks inside the timed loop body: report
+                        # the correction, then drop the partial group and the gap it
+                        # opened, which are finalisation rather than cadence.
+                        timer.log_episode_summary(f"correction {recorded}")
+                        timer.restart()
+
+                # On-demand upload
+                if events.upload_requested.is_set():
+                    events.upload_requested.clear()
+                    logger.info("Upload requested by user")
+                    self._background_push(dataset, cfg)
+
+                phase = events.phase
+                obs_processed = None
+                with timer.section("observe"):
+                    obs = robot.get_observation()
+
+                # --- CORRECTING: human teleop control + recording ---
+                # TODO(Steven): teleop runs at the same FPS as the policy. To
+                # decouple the two, sample teleop at its native rate and
+                # interpolate to the control loop's tick rate.
+                if phase == DAggerPhase.CORRECTING:
+                    with timer.section("process_obs"):
+                        obs_processed = ctx.processors.robot_observation_processor(obs)
+                    with timer.section("teleop"):
+                        teleop_action = teleop.get_action()
+                        processed_teleop = ctx.processors.teleop_action_processor((teleop_action, obs))
+                        robot_action_to_send = ctx.processors.robot_action_processor((processed_teleop, obs))
+                    with timer.section("send"):
+                        robot.send_action(robot_action_to_send)
+                    last_action = robot_action_to_send
+                    with timer.section("telemetry"):
+                        self._log_telemetry(obs_processed, processed_teleop, ctx.runtime)
+
+                    if correction_tick % correction_stride == 0:
+                        with timer.section("record"):
+                            obs_frame = build_dataset_frame(features, obs_processed, prefix=OBS_STR)
+                            action_frame = build_dataset_frame(features, processed_teleop, prefix=ACTION)
+                            dataset.add_frame(
+                                {
+                                    **obs_frame,
+                                    **action_frame,
+                                    "task": correction_task,
+                                    "intervention": np.array([True], dtype=bool),
+                                }
                             )
-                            log_say(f"Correction {recorded} saved", play_sounds)
-                            # ``save_episode`` blocks inside the timed loop body: report
-                            # the correction, then drop the partial group and the gap it
-                            # opened, which are finalisation rather than cadence.
-                            timer.log_episode_summary(f"correction {recorded}")
-                            timer.restart()
+                    correction_tick += 1
 
-                    # On-demand upload
-                    if events.upload_requested.is_set():
-                        events.upload_requested.clear()
-                        logger.info("Upload requested by user")
-                        self._background_push(dataset, cfg)
-
-                    phase = events.phase
-                    with timer.section("observe"):
-                        obs = robot.get_observation()
-
-                    # --- CORRECTING: human teleop control + recording ---
-                    # TODO(Steven): teleop runs at the same FPS as the policy. To
-                    # decouple the two, sample teleop at its native rate and
-                    # interpolate to the control loop's tick rate.
-                    if phase == DAggerPhase.CORRECTING:
-                        with timer.section("process_obs"):
-                            obs_processed = ctx.processors.robot_observation_processor(obs)
-                        with timer.section("teleop"):
-                            teleop_action = teleop.get_action()
-                            processed_teleop = ctx.processors.teleop_action_processor((teleop_action, obs))
-                            robot_action_to_send = ctx.processors.robot_action_processor(
-                                (processed_teleop, obs)
-                            )
+                # --- PAUSED: hold position ---
+                elif phase == DAggerPhase.PAUSED:
+                    if last_action:
                         with timer.section("send"):
-                            robot.send_action(robot_action_to_send)
-                        last_action = robot_action_to_send
+                            robot.send_action(last_action)
+
+                # --- AUTONOMOUS: policy control (no recording) ---
+                else:
+                    with timer.section("process_obs"):
+                        obs_processed = self._process_observation_and_notify(ctx.processors, obs)
+
+                    if self._handle_warmup(cfg.use_torch_compile, timer):
+                        continue
+
+                    action_dict = send_next_action(obs_processed, obs, ctx, interpolator, timer)
+                    if action_dict is not None:
                         with timer.section("telemetry"):
-                            self._log_telemetry(obs_processed, processed_teleop, ctx.runtime)
+                            self._log_telemetry(obs_processed, action_dict, ctx.runtime)
+                        last_action = ctx.processors.robot_action_processor((action_dict, obs))
 
-                        if correction_tick % correction_stride == 0:
-                            with timer.section("record"):
-                                obs_frame = build_dataset_frame(features, obs_processed, prefix=OBS_STR)
-                                action_frame = build_dataset_frame(features, processed_teleop, prefix=ACTION)
-                                dataset.add_frame(
-                                    {
-                                        **obs_frame,
-                                        **action_frame,
-                                        "task": task_str,
-                                        "intervention": np.array([True], dtype=bool),
-                                    }
-                                )
-                        correction_tick += 1
+                engine.pump_query(obs_processed)
+                timer.wait()
 
-                    # --- PAUSED: hold position ---
-                    elif phase == DAggerPhase.PAUSED:
-                        if last_action:
-                            with timer.section("send"):
-                                robot.send_action(last_action)
+        finally:
+            logger.info("DAgger corrections-only loop ended — pausing engine")
+            timer.log_run_summary()
+            engine.pause()
+            if events.phase == DAggerPhase.CORRECTING and teleop_supports_feedback(teleop):
+                teleop.enable_torque()
+            if not self._dataset_poisoned and self._save_correction(dataset):
+                logger.info("Final in-progress correction saved")
 
-                    # --- AUTONOMOUS: policy control (no recording) ---
-                    else:
-                        with timer.section("process_obs"):
-                            obs_processed = self._process_observation_and_notify(ctx.processors, obs)
-
-                        if self._handle_warmup(cfg.use_torch_compile, timer):
-                            continue
-
-                        action_dict = send_next_action(obs_processed, obs, ctx, interpolator, timer)
-                        if action_dict is not None:
-                            with timer.section("telemetry"):
-                                self._log_telemetry(obs_processed, action_dict, ctx.runtime)
-                            last_action = ctx.processors.robot_action_processor((action_dict, obs))
-
-                    timer.wait()
-
-            finally:
-                logger.info("DAgger corrections-only loop ended — pausing engine")
-                timer.log_run_summary()
-                engine.pause()
-                with contextlib.suppress(Exception):
-                    with self._episode_lock:
-                        dataset.save_episode()
-                    self._needs_push.set()
-                    logger.info("Final in-progress episode saved")
+    def _save_correction(self, dataset) -> bool:
+        """Save a nonempty correction once; never retry a partially failed write."""
+        with self._episode_lock:
+            if not dataset.has_pending_frames():
+                return False
+            try:
+                dataset.save_episode()
+            except Exception:
+                self._dataset_poisoned = True
+                raise
+        self._needs_push.set()
+        return True
 
     # ------------------------------------------------------------------
     # State-machine transition side-effects

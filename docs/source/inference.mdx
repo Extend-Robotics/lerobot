@@ -380,7 +380,9 @@ lerobot-rollout \
     --interactive=true
 ```
 
-The other recording strategies (episodic, DAgger, highlight) are not supported: they bind their own keyboard controls and finalize the dataset when `run()` exits, so they cannot be restarted segment by segment.
+DAgger also supports controller segments in corrections-only mode (`--strategy.record_autonomous=false`). For the interactive CLI, use `--strategy.input_device=pedal` so its controls do not compete with the stdin prompt. Each run starts autonomously and has its own correction-count target. Reset saves a nonempty in-progress correction, pauses inference, and returns home; the dataset remains open until teardown. Correction frames retain the task active when the correction began. Programmatic `RolloutController` use can retain keyboard controls when no stdin prompt is running.
+
+Continuous-recording DAgger, episodic, and highlight remain one-shot strategies and cannot be restarted by the controller.
 
 ### Programmatic control
 
@@ -434,7 +436,7 @@ strategy.teardown(ctx)  # teardown stays with the caller
 | `--display_data`                  | Stream telemetry to Rerun visualization                           | false   |
 | `--display_ip` / `--display_port` | Remote Rerun server address                                       | --      |
 | `--interpolation_multiplier`      | Robot commands per policy action (control at `fps × N` Hz)        | 1       |
-| `--interactive`                   | Chat session on stdin; robot idles until `/start` (base, sentry)  | false   |
+| `--interactive`                   | Chat session on stdin; robot idles until `/start` (base, sentry, corrections-only DAgger)  | false   |
 | `--use_torch_compile`             | Enable `torch.compile` for inference                              | false   |
 | `--resume`                        | Resume a previous recording session                               | false   |
 | `--play_sounds`                   | Vocal synthesis for events                                        | true    |
@@ -506,3 +508,34 @@ finally:
 ```
 
 See `examples/so100_to_so100_EE/rollout.py` and `examples/phone_to_so100/rollout.py` for full examples with kinematics processors.
+
+
+### Minimal episode API
+
+Install the server extra alongside your hardware and policy dependencies:
+
+```bash
+uv pip install -e '.[rollout-server]'
+uv run --no-sync lerobot-rollout-server \
+    --config_path=configs/rollout_pi05_leyland_merged_corrections.json
+```
+
+The server accepts the usual rollout configuration plus `--host` (default `127.0.0.1`)
+and `--port` (default `8000`). Use corrections-only DAgger, with `interactive=false`
+and `display_data=false`. Hardware connects once and inference stays paused until a request:
+
+```bash
+curl http://127.0.0.1:8000/episode \
+    -H 'Content-Type: application/json' \
+    -d '{"task":"Pick a fuse and install it on a jig","timeout_s":30}'
+```
+
+The request waits for the timed segment to finish, then returns `{"status":"done"}`.
+The timeout measures elapsed segment time, including pilot pauses and corrections.
+Completed corrections are saved, but do not end the HTTP episode; a partial correction
+is saved at timeout. Recording retains the task active when each correction started.
+Saving and pausing can delay the response slightly beyond the timeout.
+The robot stays connected and the policy pauses between requests. This server does
+not home the robot or run a success classifier. It ignores the configured correction
+count and uses the request timeout instead. Only one episode runs at a time (`409`
+for overlaps); interrupted or failed execution returns `503`, and invalid input `422`.

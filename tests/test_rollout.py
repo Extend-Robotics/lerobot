@@ -1532,3 +1532,189 @@ def test_sync_engine_without_a_relative_step_binds_nothing():
     policy.config.use_amp = False
     assert bind_relative_anchor(policy, MagicMock(steps=[])) is None
     _build_sync_engine(policy, MagicMock(steps=[]), MagicMock())  # must not raise
+
+
+@pytest.mark.parametrize("finish_correction", [False, True])
+@pytest.mark.parametrize("streaming", [None, False, True])
+def test_dagger_controller_restarts_with_real_dataset(tmp_path, monkeypatch, finish_correction, streaming):
+    """Reset saves a partial correction; later runs append to the same open writer."""
+    import time
+
+    import numpy as np
+    import pyarrow.parquet as pq
+
+    from lerobot.configs import RGBEncoderConfig
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    from lerobot.rollout import DAggerStrategyConfig, LinkedEvent, RolloutController, RolloutEvent
+    from lerobot.rollout.strategies import DAggerStrategy
+    from lerobot.rollout.strategies.dagger import DAggerPhase
+
+    config = DAggerStrategyConfig(num_episodes=1, smooth_handover=False)
+    strategy = DAggerStrategy(config)
+    ctx, _ = _make_loop_ctx(fps=200, multiplier=1, num_ticks=10**9)
+    ctx.runtime.shutdown_event = LinkedEvent(threading.Event())
+    ctx.runtime.cfg.autosteer_interval_s = 0
+    ctx.runtime.cfg.return_to_initial_position = False
+    ctx.runtime.cfg.dataset.push_to_hub = False
+    ctx.runtime.cfg.dataset.streaming_encoding = bool(streaming)
+    ctx.hardware.initial_position = {"m.pos": 0.0}
+    ctx.hardware.teleop.feedback_features = {}
+    ctx.hardware.teleop.get_action.return_value = {"m.pos": 42.0}
+    engine = ctx.policy.inference
+    engine.failed = False
+    engine.task = "launch task"
+    engine.set_task.side_effect = lambda task: setattr(engine, "task", task) or True
+    features = {**_LOOP_FEATURES, **config.extra_dataset_features()}
+    if streaming is not None:
+        features["observation.images.front"] = {
+            "dtype": "video",
+            "shape": (64, 96, 3),
+            "names": ["height", "width", "channels"],
+        }
+        observe = ctx.hardware.robot_wrapper.get_observation.side_effect
+        ctx.hardware.robot_wrapper.get_observation.side_effect = lambda: {
+            **observe(),
+            "front": np.zeros((64, 96, 3), dtype=np.uint8),
+        }
+    dataset = LeRobotDataset.create(
+        repo_id="test/corrections",
+        fps=200,
+        features=features,
+        root=tmp_path / "ds",
+        streaming_encoding=bool(streaming),
+        rgb_encoder=RGBEncoderConfig(vcodec="h264"),
+    )
+    ctx.data.dataset = dataset
+    ctx.data.dataset_features = features
+    monkeypatch.setattr("lerobot.rollout.strategies.dagger._init_dagger_keyboard", lambda *_: None)
+    home = MagicMock(return_value=True)
+    monkeypatch.setattr(strategy, "return_to_initial_position", home)
+    save = MagicMock(wraps=dataset.save_episode)
+    monkeypatch.setattr(dataset, "save_episode", save)
+    strategy.setup(ctx)
+    events = []
+    controller = RolloutController(strategy, ctx, on_event=lambda event, _: events.append(event))
+    thread = threading.Thread(target=controller.serve, daemon=True)
+    thread.start()
+
+    def wait_for(predicate):
+        deadline = time.monotonic() + 5
+        while not predicate() and time.monotonic() < deadline:
+            time.sleep(0.002)
+        assert predicate(), controller.failure_traceback
+
+    try:
+        engine.resume.assert_not_called()
+        for index, task in enumerate(("first task", "second task"), start=1):
+            controller.set_task(task)
+            assert controller.start()
+            wait_for(lambda index=index: engine.resume.call_count >= index)
+            assert strategy._events.phase == DAggerPhase.AUTONOMOUS
+            strategy._events.request_transition("pause_resume")
+            wait_for(lambda: strategy._events.phase == DAggerPhase.PAUSED)
+            strategy._events.request_transition("correction")
+            wait_for(dataset.has_pending_frames)
+            if finish_correction:
+                strategy._events.request_transition("correction")
+                wait_for(lambda index=index: events.count(RolloutEvent.SEGMENT_ENDED) == index)
+            controller.reset()
+            wait_for(lambda index=index: events.count(RolloutEvent.RESET_DONE) == index)
+            assert dataset.num_episodes == index
+            assert save.call_count == index
+            assert not dataset._is_finalized
+            assert not dataset.has_pending_frames()
+            assert not controller.running
+            assert home.call_count == index
+
+        # An autonomous-only segment must not create an empty dataset episode.
+        assert controller.start()
+        wait_for(lambda: engine.resume.call_count == 3)
+        controller.reset()
+        wait_for(lambda: events.count(RolloutEvent.RESET_DONE) == 3)
+        assert save.call_count == 2
+    finally:
+        controller.stop()
+        thread.join(timeout=5)
+        strategy.teardown(ctx)
+    assert not thread.is_alive()
+    assert dataset._is_finalized
+    assert not controller.failed
+    rows = [
+        row for path in (dataset.root / "data").rglob("*.parquet") for row in pq.read_table(path).to_pylist()
+    ]
+    assert rows
+    assert {row["episode_index"] for row in rows} == {0, 1}
+    assert all(row["intervention"] is True and row["action"] == 42.0 for row in rows)
+    if streaming is not None:
+        import av
+
+        decoded = 0
+        for path in (dataset.root / "videos").rglob("*.mp4"):
+            with av.open(str(path)) as video:
+                decoded += sum(1 for _ in video.decode(video=0))
+        assert decoded == len(rows)
+    tasks = dataset.meta.tasks
+    assert tasks.index.tolist() == ["first task", "second task"]
+    for row in rows:
+        assert row["task_index"] == row["episode_index"]
+
+
+def test_dagger_corrections_save_failure_is_not_retried():
+    from lerobot.rollout import DAggerStrategyConfig
+    from lerobot.rollout.strategies import DAggerStrategy
+    from lerobot.utils.action_interpolator import ActionInterpolator
+
+    strategy = DAggerStrategy(DAggerStrategyConfig(num_episodes=1, smooth_handover=False))
+
+    def on_tick(n):
+        if n == 1:
+            strategy._events.request_transition("pause_resume")
+        elif n in (2, 3):
+            strategy._events.request_transition("correction")
+
+    ctx, dataset = _make_loop_ctx(200, 1, 10, on_tick)
+    ctx.policy.inference.task = "task"
+    ctx.hardware.teleop.get_action.return_value = {"m.pos": 42.0}
+    strategy._engine = ctx.policy.inference
+    strategy._interpolator = ActionInterpolator(multiplier=1)
+    dataset.save_episode.side_effect = OSError("write failed")
+    with pytest.raises(OSError, match="write failed"):
+        strategy.run(ctx)
+    assert dataset.save_episode.call_count == 1
+    with pytest.raises(RuntimeError, match="save failure"):
+        strategy.run(ctx)
+    assert dataset.save_episode.call_count == 1
+
+
+def test_dagger_only_corrections_mode_is_restartable():
+    from lerobot.rollout import DAggerStrategyConfig
+
+    assert DAggerStrategyConfig().supports_interactive
+    assert not DAggerStrategyConfig(record_autonomous=True).supports_interactive
+
+
+@pytest.mark.parametrize(
+    "record_autonomous,input_device,allowed",
+    [(False, "pedal", True), (False, "keyboard", False), (True, "pedal", False)],
+)
+def test_interactive_dagger_configuration(record_autonomous, input_device, allowed):
+    from lerobot.configs.dataset import DatasetRecordConfig
+    from lerobot.rollout import DAggerStrategyConfig, RolloutConfig
+    from tests.mocks.mock_robot import MockRobotConfig
+    from tests.mocks.mock_teleop import MockTeleopConfig
+
+    def build():
+        return RolloutConfig(
+            robot=MockRobotConfig(),
+            teleop=MockTeleopConfig(),
+            policy=SimpleNamespace(device="cpu"),
+            interactive=True,
+            strategy=DAggerStrategyConfig(record_autonomous=record_autonomous, input_device=input_device),
+            dataset=DatasetRecordConfig(repo_id="test/corrections"),
+        )
+
+    if allowed:
+        assert build().strategy.supports_interactive
+    else:
+        with pytest.raises(ValueError, match="supports|stdin belongs"):
+            build()

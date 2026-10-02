@@ -255,6 +255,11 @@ class DAggerStrategyConfig(RolloutStrategyConfig):
         if self.input_device not in ("keyboard", "pedal"):
             raise ValueError(f"DAgger input_device must be 'keyboard' or 'pedal', got '{self.input_device}'")
 
+    @property
+    def supports_interactive(self) -> bool:
+        """Only corrections-only recording keeps its dataset open between runs."""
+        return not self.record_autonomous
+
     def requires_streaming_encoding(self) -> bool:
         # Only when the autonomous phase is recorded too; corrections are saved between phases.
         return self.record_autonomous
@@ -377,6 +382,13 @@ class RolloutConfig:
             raise ValueError(
                 f"--interactive=true supports --strategy.type={supported} (got '{self.strategy.type}')."
             )
+
+        if (
+            self.interactive
+            and isinstance(strategy, DAggerStrategyConfig)
+            and strategy.input_device == "keyboard"
+        ):
+            raise ValueError("Interactive DAgger requires input_device='pedal': stdin belongs to the prompt.")
 
         if self.autosteer_interval_s < 0:
             raise ValueError(f"--autosteer_interval_s must be >= 0 (got {self.autosteer_interval_s}).")
