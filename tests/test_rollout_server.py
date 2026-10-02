@@ -17,6 +17,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset  # noqa: E402
 from lerobot.rollout import (
     DAggerStrategyConfig,  # noqa: E402
     server,  # noqa: E402
+    success as success_module,
 )
 from lerobot.rollout.strategies import DAggerStrategy  # noqa: E402
 from tests.test_rollout import _LOOP_FEATURES, _make_loop_ctx  # noqa: E402
@@ -24,6 +25,8 @@ from tests.test_rollout import _LOOP_FEATURES, _make_loop_ctx  # noqa: E402
 
 @pytest.fixture
 def session(tmp_path, monkeypatch, request):
+    options = getattr(request, "param", None)
+    success_options = options if isinstance(options, dict) else None
     cfg_strategy = DAggerStrategyConfig(num_episodes=1, smooth_handover=False)
     strategy = DAggerStrategy(cfg_strategy)
     started = Event()
@@ -37,6 +40,8 @@ def session(tmp_path, monkeypatch, request):
     def on_tick(_n):
         nonlocal tick
         tick += 1
+        if success_options is not None:
+            return
         if tick == 1:
             strategy._events.request_transition("pause_resume")
         elif tick in (2, 3):
@@ -47,7 +52,7 @@ def session(tmp_path, monkeypatch, request):
     cfg.strategy = cfg_strategy
     cfg.interactive = False
     cfg.duration = 0.001  # The API must disable this standalone rollout limit.
-    display_mode = getattr(request, "param", None)
+    display_mode = options if isinstance(options, str) else None
     cfg.display_data = display_mode is not None
     cfg.display_mode = display_mode or "rerun"
     cfg.display_ip = "127.0.0.1"
@@ -90,7 +95,14 @@ def session(tmp_path, monkeypatch, request):
     monkeypatch.setattr("lerobot.rollout.strategies.dagger._init_dagger_keyboard", lambda *_: None)
     return_home = MagicMock(wraps=strategy.return_to_initial_position)
     monkeypatch.setattr(strategy, "return_to_initial_position", return_home)
-    with TestClient(server.create_app(cfg)) as client:
+    success_cfg = None
+    if success_options is not None:
+        predictor = MagicMock(return_value=success_options.get("probability", 1.0))
+        if success_options.get("error"):
+            predictor.side_effect = RuntimeError("classifier unavailable")
+        monkeypatch.setattr(success_module, "SuccessClassifier", lambda _: predictor)
+        success_cfg = success_module.SuccessDetectionConfig("unused", interval_s=0.01)
+    with TestClient(server.create_app(cfg, success=success_cfg)) as client:
         yield client, ctx, dataset, started
         returns_before_teardown = return_home.call_count
 
@@ -124,7 +136,7 @@ def test_timed_episodes_keep_session_connected(session):
         start = time.monotonic()
         response = client.post("/episode", json={"task": task, "timeout_s": 0.08})
         assert response.status_code == 200, response.text
-        assert response.json() == {"status": "done"}
+        assert response.json() == {"status": "done", "outcome": "timeout"}
         assert time.monotonic() - start >= 0.08
         assert engine.task == "launch task"
         assert ctx.hardware.robot_wrapper.send_action.call_args.args[0] == ctx.hardware.initial_position
@@ -143,7 +155,7 @@ def test_overlapping_episode_is_rejected(session):
         assert started.wait(2)
         response = client.post("/episode", json={"task": "second", "timeout_s": 0.01})
         assert response.status_code == 409
-        assert pending.result(timeout=3).json() == {"status": "done"}
+        assert pending.result(timeout=3).json() == {"status": "done", "outcome": "timeout"}
 
 
 @pytest.mark.parametrize(
@@ -201,7 +213,10 @@ def test_interrupted_correction_with_slow_save_is_not_done(session, monkeypatch)
     assert interrupted.is_set()
     assert response.status_code == 503
     assert dataset.num_episodes == 2
-    assert client.post("/episode", json={"task": "next", "timeout_s": 0.08}).json() == {"status": "done"}
+    assert client.post("/episode", json={"task": "next", "timeout_s": 0.08}).json() == {
+        "status": "done",
+        "outcome": "timeout",
+    }
 
 
 @pytest.mark.parametrize("signal_name", ["SIGINT", "SIGTERM"])
@@ -258,7 +273,7 @@ def test_display_enabled_across_episodes(session):
     for task in ("first", "second"):
         response = client.post("/episode", json={"task": task, "timeout_s": 0.08})
         assert response.status_code == 200, response.text
-        assert response.json() == {"status": "done"}
+        assert response.json() == {"status": "done", "outcome": "timeout"}
     assert dataset.num_episodes == 2
 
 
@@ -355,4 +370,65 @@ def test_server_requests_reset_while_control_loop_is_blocked(session, monkeypatc
             assert not pending.done()  # Still wait for cleanup and the return move.
         finally:
             release_observation.set()
-        assert pending.result(timeout=3).json() == {"status": "done"}
+        assert pending.result(timeout=3).json() == {"status": "done", "outcome": "timeout"}
+
+
+@pytest.mark.parametrize("session", [{"probability": 1.0}], indirect=True)
+def test_success_returns_home_early_and_session_can_restart(session):
+    client, ctx, _, _ = session
+    for _ in range(2):
+        start = time.monotonic()
+        response = client.post("/episode", json={"task": "task", "timeout_s": 2})
+        assert response.status_code == 200, response.text
+        assert response.json() == {"status": "done", "outcome": "success"}
+        assert time.monotonic() - start < 1
+        assert ctx.policy.inference.task == "launch task"
+        assert ctx.hardware.robot_wrapper.send_action.call_args.args[0] == ctx.hardware.initial_position
+
+
+@pytest.mark.parametrize("session", [{"probability": 0.0}], indirect=True)
+def test_negative_classifier_runs_until_timeout(session):
+    client, _, _, _ = session
+    start = time.monotonic()
+    response = client.post("/episode", json={"task": "task", "timeout_s": 0.08})
+    assert response.json() == {"status": "done", "outcome": "timeout"}
+    assert time.monotonic() - start >= 0.08
+
+
+@pytest.mark.parametrize("session", [{"error": True}], indirect=True)
+def test_classifier_error_returns_home_and_reports_failure(session):
+    client, ctx, _, _ = session
+    response = client.post("/episode", json={"task": "task", "timeout_s": 2})
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Success classifier failed"
+    assert ctx.hardware.robot_wrapper.send_action.call_args.args[0] == ctx.hardware.initial_position
+
+
+@pytest.mark.parametrize("session", [{"probability": 1.0}], indirect=True)
+def test_detected_success_still_requires_return_home(session):
+    client, ctx, _, _ = session
+    ctx.hardware.initial_position = None
+    response = client.post("/episode", json={"task": "task", "timeout_s": 2})
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Could not return to the initial position"
+
+
+@pytest.mark.parametrize("session", [{"probability": 1.0}], indirect=True)
+def test_success_waits_for_return_and_rejects_overlap(session, monkeypatch):
+    client, _, _, _ = session
+    returning, release = Event(), Event()
+
+    def wait_during_return(_duration):
+        returning.set()
+        assert release.wait(3)
+
+    monkeypatch.setattr("lerobot.rollout.strategies.core.precise_sleep", wait_during_return)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(client.post, "/episode", json={"task": "task", "timeout_s": 2})
+        try:
+            assert returning.wait(2)
+            assert not pending.done()
+            assert client.post("/episode", json={"task": "overlap", "timeout_s": 2}).status_code == 409
+        finally:
+            release.set()
+        assert pending.result(timeout=3).json() == {"status": "done", "outcome": "success"}

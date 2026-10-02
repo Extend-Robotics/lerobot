@@ -530,15 +530,39 @@ curl http://127.0.0.1:8000/episode \
     -d '{"task":"Pick a fuse and install it on a jig","timeout_s":30}'
 ```
 
-The request waits for the timed segment to finish, then returns `{"status":"done"}`.
-The timeout measures elapsed segment time, including pilot pauses and corrections.
-Completed corrections are saved, but do not end the HTTP episode; a partial correction
-is saved at timeout. Recording retains the task active when each correction started.
-Saving and pausing can delay the response slightly beyond the timeout.
-The robot stays connected and the policy pauses between requests. This server does
-not home the robot or run a success classifier. It ignores the configured correction
-count and uses the request timeout instead. Only one episode runs at a time (`409`
-for overlaps); interrupted or failed execution returns `503`, and invalid input `422`.
+The request waits for execution to end and for the robot to return to its initial
+position, then returns `{"status":"done","outcome":"timeout"}`. The server owns the timeout, which includes
+pilot pauses and corrections; strategy duration and correction-count limits are disabled.
+Completed corrections are saved, and a partial correction is saved when execution ends.
+Saving and the return movement can delay the response beyond the timeout. Recording
+retains the task active when each correction started. Hardware stays connected between
+requests. Only one episode runs at a time, including the return movement (`409` for
+overlaps); interruptions, failed returns, or execution failures produce `503`, and
+invalid input produces `422`.
+
+To finish early when the success classifier detects task completion, add these flags
+from the repository root:
+
+```bash
+--success.pretrained_path=outputs/leyland_demo_and_rollout_with_success_reward_classifier \
+--success.interval_s=0.5 \
+--success.threshold=0.5 \
+--success.device=cuda
+```
+
+The model loads once at startup. During autonomous execution, a background worker
+classifies camera observations every 0.5 seconds (or as fast as inference allows if
+slower). It does not sample during pauses, corrections, or returning home. Results
+from a previous episode or autonomous phase are discarded. The supplied checkpoint
+uses the `front` and `realsense` RGB cameras and the preprocessing from the custom
+success-classifier training script: pixels scaled to `[0, 1]`, resized to 128×128.
+The probability threshold is configurable and defaults to 0.5.
+
+The response always includes an `outcome`. With detection enabled, it is `{"status":"done","outcome":"success"}`
+after detected success **and successful return home**, or
+`{"status":"done","outcome":"timeout"}` if the deadline expires first. A classifier
+error requests a return home and responds with `503`; it never reports success.
+Omit `--success.pretrained_path` to retain timeout-only operation.
 
 
 For live visualization, install the `viz` extra and add the usual display flags:

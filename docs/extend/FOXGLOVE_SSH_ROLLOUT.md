@@ -152,7 +152,8 @@ uv run --no-sync python -m lerobot.scripts.lerobot_rollout_server \
   --display_ip=127.0.0.1 \
   --display_port=8765 \
   --display_compressed_images=true \
-  --dataset.root="/home/oleg/extend_lerobot/lerobot/datasets/api_test_$(date +%Y%m%d_%H%M%S)"
+  --dataset.root="/home/oleg/extend_lerobot/lerobot/datasets/api_test_$(date +%Y%m%d_%H%M%S)" \
+  --success.pretrained_path=/home/oleg/extend_lerobot/lerobot/outputs/leyland_demo_and_rollout_with_success_reward_classifier
 ```
 
 Adjust the checkout path and hardware configuration for your setup. Each launch

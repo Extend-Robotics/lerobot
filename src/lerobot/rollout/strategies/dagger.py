@@ -586,6 +586,8 @@ class DAggerStrategy(RolloutStrategy):
                 transition = events.consume_transition()
                 if transition is not None:
                     old_phase, new_phase = transition
+                    if ctx.runtime.observation_observer is not None:
+                        ctx.runtime.observation_observer(None, new_phase == DAggerPhase.AUTONOMOUS)
                     self._apply_transition(
                         old_phase,
                         new_phase,
@@ -631,6 +633,8 @@ class DAggerStrategy(RolloutStrategy):
                 obs_processed = None
                 with timer.section("observe"):
                     obs = robot.get_observation()
+                if ctx.runtime.observation_observer is not None:
+                    ctx.runtime.observation_observer(obs, phase == DAggerPhase.AUTONOMOUS)
 
                 # --- CORRECTING: human teleop control + recording ---
                 # TODO(Steven): teleop runs at the same FPS as the policy. To
@@ -687,6 +691,8 @@ class DAggerStrategy(RolloutStrategy):
                 timer.wait()
 
         finally:
+            if ctx.runtime.observation_observer is not None:
+                ctx.runtime.observation_observer(None, False)
             logger.info("DAgger corrections-only loop ended — pausing engine")
             timer.log_run_summary()
             engine.pause()

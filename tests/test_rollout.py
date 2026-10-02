@@ -1027,7 +1027,9 @@ def _make_loop_ctx(fps: float, multiplier: int, num_ticks: int, on_tick=None):
     # A real (non-existent) path so VideoEncodingManager's image-dir cleanup no-ops.
     dataset.root = Path("/nonexistent-lerobot-rollout-test")
     ctx = SimpleNamespace(
-        runtime=SimpleNamespace(cfg=cfg, shutdown_event=shutdown_event, cadence_report=None),
+        runtime=SimpleNamespace(
+            cfg=cfg, shutdown_event=shutdown_event, cadence_report=None, observation_observer=None
+        ),
         hardware=SimpleNamespace(robot_wrapper=robot, teleop=MagicMock(), initial_position=None),
         processors=SimpleNamespace(
             robot_observation_processor=MagicMock(side_effect=lambda obs: obs),

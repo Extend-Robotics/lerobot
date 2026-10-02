@@ -209,6 +209,9 @@ class RuntimeContext:
     # must forward it to the timer it builds in ``run()``, since a session mutes
     # everything below ERROR.
     cadence_report: Callable[[str], None] | None = None
+    # Optional nonblocking observer of raw observations and autonomous state.
+    # None observations announce phase changes or loop exit.
+    observation_observer: Callable[[dict | None, bool], None] | None = None
 
 
 @dataclass
