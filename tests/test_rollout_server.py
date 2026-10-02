@@ -46,6 +46,7 @@ def session(tmp_path, monkeypatch, request):
     cfg = ctx.runtime.cfg
     cfg.strategy = cfg_strategy
     cfg.interactive = False
+    cfg.duration = 0.001  # The API must disable this standalone rollout limit.
     display_mode = getattr(request, "param", None)
     cfg.display_data = display_mode is not None
     cfg.display_mode = display_mode or "rerun"
@@ -132,6 +133,7 @@ def test_timed_episodes_keep_session_connected(session):
         ctx.hardware.robot_wrapper.inner.disconnect.assert_not_called()
     assert dataset.meta.tasks.index.tolist() == ["first task", "second task"]
     assert ctx.runtime.cfg.return_to_initial_position is True
+    assert ctx.runtime.cfg.duration == 0
 
 
 def test_overlapping_episode_is_rejected(session):
@@ -322,3 +324,35 @@ def test_request_waits_and_rejects_overlap_during_return(session, monkeypatch, s
             release.set()
         response = pending.result(timeout=3)
         assert response.status_code == (503 if shutdown_during_reset else 200)
+
+
+def test_server_requests_reset_while_control_loop_is_blocked(session, monkeypatch):
+    client, ctx, _, _ = session
+    observing = Event()
+    release_observation = Event()
+    reset_requested = Event()
+    get_observation = ctx.hardware.robot_wrapper.get_observation
+    reset = server.RolloutController.reset
+
+    def blocked_observation():
+        observing.set()
+        assert release_observation.wait(3)
+        return get_observation()
+
+    def request_reset(controller):
+        result = reset(controller)
+        reset_requested.set()
+        return result
+
+    monkeypatch.setattr(ctx.hardware.robot_wrapper, "get_observation", blocked_observation)
+    monkeypatch.setattr(server.RolloutController, "reset", request_reset)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(client.post, "/episode", json={"task": "task", "timeout_s": 0.08})
+        try:
+            assert observing.wait(2)
+            # The server deadline must fire without another control-loop tick.
+            assert reset_requested.wait(2)
+            assert not pending.done()  # Still wait for cleanup and the return move.
+        finally:
+            release_observation.set()
+        assert pending.result(timeout=3).json() == {"status": "done"}

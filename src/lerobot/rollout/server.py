@@ -55,10 +55,7 @@ class _RolloutSession:
     waking means it can inspect the outcome, not necessarily that it succeeded.
     """
 
-    def __init__(
-        self, cfg: RolloutConfig, ctx: RolloutContext, strategy: DAggerStrategy, shutdown_event: Event
-    ):
-        self.cfg = cfg
+    def __init__(self, ctx: RolloutContext, strategy: DAggerStrategy, shutdown_event: Event):
         self.strategy = strategy
         self.shutdown_event = shutdown_event
         self.episode_lock = Lock()
@@ -67,28 +64,15 @@ class _RolloutSession:
         self.controller = RolloutController(strategy, ctx, on_event=self.on_controller_event)
 
     def on_controller_event(self, event: RolloutEvent, _payload) -> None:
-        """Run on the controller thread; successful rollout still needs a reset."""
-        match event:
-            case RolloutEvent.SEGMENT_ENDED:
-                if (
-                    self.strategy.timed_out
-                    and not self.shutdown_event.is_set()
-                    and not self.controller.failed
-                ):
-                    # Queue the return move and keep the request waiting for its result.
-                    # reset() returns task-restoration status, not movement success.
-                    self.controller.reset()
-                    return
-                # An interrupted segment finishes the request without returning home.
-            case (
-                RolloutEvent.RESET_DONE
-                | RolloutEvent.RESET_FAILED
-                | RolloutEvent.RESET_SKIPPED
-                | RolloutEvent.STOPPED
-            ):
-                pass
-            case _:
-                return
+        """Publish completion or interruption from the controller thread."""
+        if event not in (
+            RolloutEvent.SEGMENT_ENDED,
+            RolloutEvent.RESET_DONE,
+            RolloutEvent.RESET_FAILED,
+            RolloutEvent.RESET_SKIPPED,
+            RolloutEvent.STOPPED,
+        ):
+            return
         self.terminal_event = event
         self.request_finished.set()
 
@@ -102,16 +86,25 @@ class _RolloutSession:
                 raise HTTPException(503, "Rollout session is unavailable")
             self.request_finished.clear()
             self.terminal_event = None
-            self.cfg.duration = request.timeout_s
             controller.set_task(request.task)
             if not controller.start():
                 raise HTTPException(503, "Could not start the episode")
-            self.request_finished.wait()
+            # The server owns the deadline; the strategy runs until asked to stop.
+            timed_out = not self.request_finished.wait(timeout=request.timeout_s)
+            if timed_out:
+                if not (self.shutdown_event.is_set() or controller.failed or self.strategy.stop_requested):
+                    # reset() queues the return move; its boolean result only describes
+                    # task restoration. Wait for RESET_DONE to confirm the movement.
+                    controller.reset()
+                # Even an interrupted run may still be saving a correction. Keep the
+                # request lock until the controller has finished cleanup or returning home.
+                self.request_finished.wait()
             if (
                 self.shutdown_event.is_set()
                 or controller.failed
                 or controller.stopped
-                or not self.strategy.timed_out
+                or self.strategy.stop_requested
+                or not timed_out
             ):
                 raise HTTPException(503, "Episode interrupted before completion")
             if self.terminal_event is not RolloutEvent.RESET_DONE:
@@ -126,9 +119,10 @@ def create_app(cfg: RolloutConfig, shutdown_event: Event | None = None) -> FastA
     if cfg.interactive:
         raise ValueError("The API requires interactive=false")
 
-    # Override the supplied config: effectively disable the correction-count limit
-    # so each request's timeout ends the rollout. API success also requires returning home.
+    # Disable strategy-owned limits for API sessions: the server decides when to
+    # end execution and return home. Standalone rollouts still honour cfg.duration.
     cfg.strategy.num_episodes = 2**63 - 1
+    cfg.duration = 0.0
     cfg.return_to_initial_position = True
     session: _RolloutSession | None = None
     if shutdown_event is None:
@@ -150,7 +144,7 @@ def create_app(cfg: RolloutConfig, shutdown_event: Event | None = None) -> FastA
             try:
                 strategy.setup(ctx)
                 ctx.policy.inference.pause()
-                session = _RolloutSession(cfg, ctx, strategy, shutdown_event)
+                session = _RolloutSession(ctx, strategy, shutdown_event)
                 thread = Thread(target=session.controller.serve, name="rollout-controller")
                 thread.start()
                 yield

@@ -254,8 +254,6 @@ class DAggerStrategy(RolloutStrategy):
         self._needs_push = Event()
         self._episode_lock = Lock()
         self._dataset_poisoned = False
-        # Last corrections-only run reached its duration limit before saving/cleanup.
-        self.timed_out = False
 
     def setup(self, ctx: RolloutContext) -> None:
         """Initialise the inference engine and input device listener."""
@@ -292,8 +290,12 @@ class DAggerStrategy(RolloutStrategy):
             self._episode_duration_s,
         )
 
+    @property
+    def stop_requested(self) -> bool:
+        """Whether the operator stopped this run, including while cleanup is pending."""
+        return self._events.stop_recording.is_set()
+
     def reset_control_state(self) -> None:
-        self.timed_out = False
         super().reset_control_state()
         self._events.reset()
 
@@ -577,7 +579,6 @@ class DAggerStrategy(RolloutStrategy):
                 timer.tick(new_cycle=interpolator.needs_new_action())
 
                 if cfg.duration > 0 and (time.perf_counter() - start_time) >= cfg.duration:
-                    self.timed_out = True
                     logger.info("Duration limit reached (%.0fs)", cfg.duration)
                     break
 
