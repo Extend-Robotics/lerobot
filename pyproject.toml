@@ -211,6 +211,8 @@ intelrealsense = [
 ]
 phone = ["hebi-py>=2.8.0,<2.12.0", "teleop>=0.1.0,<0.2.0", "fastapi<1.0", "lerobot[scipy-dep]"]
 
+rollout-server = ["fastapi<1.0", "uvicorn>=0.30,<1.0"]
+
 # Policies
 diffusion = ["lerobot[diffusers-dep]"]
 wallx = [
@@ -372,6 +374,7 @@ lerobot-edit-dataset="lerobot.scripts.lerobot_edit_dataset:main"
 lerobot-setup-can="lerobot.scripts.lerobot_setup_can:main"
 lerobot-annotate="lerobot.scripts.lerobot_annotate:main"
 lerobot-rollout="lerobot.scripts.lerobot_rollout:main"
+lerobot-rollout-server="lerobot.scripts.lerobot_rollout_server:main"
 
 # ---------------- Tool Configurations ----------------
 
