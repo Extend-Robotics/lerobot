@@ -15,10 +15,29 @@
 # limitations under the License.
 import importlib
 import importlib.metadata
+import importlib.util
 import logging
-from typing import Any
+from typing import Any, Literal, overload
 
 from draccus.choice_types import ChoiceRegistry
+
+
+@overload
+def is_package_available(
+    pkg_name: str, import_name: str | None = None, return_version: Literal[False] = False
+) -> bool: ...
+
+
+@overload
+def is_package_available(
+    pkg_name: str, import_name: str | None = None, *, return_version: Literal[True]
+) -> tuple[bool, str]: ...
+
+
+@overload
+def is_package_available(
+    pkg_name: str, import_name: str | None = None, return_version: bool = False
+) -> tuple[bool, str] | bool: ...
 
 
 def is_package_available(
@@ -115,7 +134,10 @@ _transformers_available = is_package_available("transformers")
 _peft_available = is_package_available("peft")
 _scipy_available = is_package_available("scipy")
 _diffusers_available = is_package_available("diffusers")
+_natten_available = is_package_available("natten")
 _torchdiffeq_available = is_package_available("torchdiffeq")
+_liger_kernel_available = is_package_available("liger-kernel", import_name="liger_kernel")
+_kernels_available = is_package_available("kernels")
 
 # Hardware SDKs
 _serial_available = is_package_available("pyserial", import_name="serial")
@@ -194,8 +216,7 @@ def make_device_from_device_class(config: ChoiceRegistry) -> Any:
         candidates.append(".".join(parts[:-1] + [last.replace("config_", "")]))
 
     # de-duplicate while preserving order
-    seen: set[str] = set()
-    candidates = [c for c in candidates if not (c in seen or seen.add(c))]
+    candidates = list(dict.fromkeys(candidates))
 
     tried: list[str] = []
     for candidate in candidates:
