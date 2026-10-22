@@ -3,24 +3,20 @@
     "type": "episodic"
   },
   "policy": {
-    "path": "/home/oleg/extend_lerobot/pretrained_model_50k/pretrained_model"
+    "path": "/home/oleg/extend_lerobot/checkpoints/060000_flux/pretrained_model",
+    "dtype": "bfloat16"
   },
   "inference": {
-    "type": "rtc",
-    "rtc": {
-      "mode": "trained",
-      "execution_horizon": 5
-    },
-    "queue_threshold": 15
+    "type": "sync"
   },
   "robot": {
     "type": "so101_follower",
-    "port": "/dev/ttyACM0",
+    "port": "/dev/ttyACM1",
     "id": "my_awesome_follower_arm",
     "cameras": {
       "front": {
         "type": "opencv",
-        "index_or_path": "/dev/video2",
+        "index_or_path": "/dev/video6",
         "width": 640,
         "height": 480,
         "fps": 30
@@ -36,21 +32,25 @@
   },
   "teleop": {
     "type": "so101_leader",
-    "port": "/dev/ttyACM1",
+    "port": "/dev/ttyACM0",
     "id": "my_awesome_leader_arm"
   },
   "dataset": {
-    "repo_id": "local/rollout_leyland_merged_500",
-    "root": "/home/oleg/extend_lerobot/lerobot/datasets/rollout_leyland_merged_500",
+    "repo_id": "local/rollout_flux3_leyland_60000",
+    "root": "/home/oleg/extend_lerobot/lerobot/datasets/rollout_flux3_leyland_60000",
     "push_to_hub": false,
     "no_stamp": true,
     "single_task": "Pick a fuse and install it on a jig",
     "num_episodes": 100,
     "fps": 30,
     "streaming_encoding": true,
-    "episode_time_s": 15,
-    "encoder_threads": 2
+    "episode_time_s": 3000,
+    "reset_time_s": 5
   },
   "fps": 30,
-  "device": "cuda"
+  "device": "cuda",
+  "rename_map": {
+    "observation.images.realsense": "observation.images.scene",
+    "observation.images.front": "observation.images.wrist"
+  }
 }
