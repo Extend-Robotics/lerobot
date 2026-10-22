@@ -229,9 +229,20 @@ class G1_29_ArmIK:  # noqa: N801
         self.init_data = np.zeros(self.reduced_robot.model.nq)
         self.smooth_filter = WeightedMovingFilter(np.array([0.4, 0.3, 0.2, 0.1]), 14)
 
+    def forward_kinematics(self, arm_q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Return left/right end-effector transforms in the reduced model's base frame.
+
+        Arm positions use G1 motor order. Legs and waist are fixed at zero in this model.
+        """
+        q_pin = np.asarray(arm_q)[self._arm_reorder_g1_to_pin]
+        data = self.reduced_robot.model.createData()
+        self._pin.framesForwardKinematics(self.reduced_robot.model, data, q_pin)
+        return data.oMf[self.L_hand_id].homogeneous.copy(), data.oMf[self.R_hand_id].homogeneous.copy()
+
     def solve_ik(self, left_wrist, right_wrist, current_lr_arm_motor_q=None, current_lr_arm_motor_dq=None):
+        """Solve for arm positions and feedforward torques, both in G1 motor order."""
         if current_lr_arm_motor_q is not None:
-            self.init_data = current_lr_arm_motor_q
+            self.init_data = np.asarray(current_lr_arm_motor_q)[self._arm_reorder_g1_to_pin]
         self.opti.set_initial(self.var_q, self.init_data)
 
         self.opti.set_value(self.param_tf_l, left_wrist)
@@ -265,7 +276,7 @@ class G1_29_ArmIK:  # noqa: N801
             np.zeros(self.reduced_robot.model.nv),
         )
 
-        return sol_q, sol_tauff
+        return sol_q[self._arm_reorder_pin_to_g1], sol_tauff[self._arm_reorder_pin_to_g1]
 
     def solve_tau(self, current_lr_arm_motor_q=None, current_lr_arm_motor_dq=None):
         try:

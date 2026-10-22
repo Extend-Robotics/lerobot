@@ -15,6 +15,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 from lerobot.cameras import CameraConfig
 from lerobot.envs.configs import G1EndEffector, UnitreeG1MujocoEnv
@@ -48,6 +49,9 @@ _DEFAULT_KP, _DEFAULT_KD = _build_gains()
 @RobotConfig.register_subclass("unitree_g1")
 @dataclass
 class UnitreeG1Config(RobotConfig):
+    # Cartesian modes control only the arms, using left_tcp/right_tcp.{x,y,z,r1-r6}.
+    control_space: Literal["joint", "cartesian_abs", "cartesian_rel"] = "joint"
+
     kp: list[float] = field(default_factory=lambda: _DEFAULT_KP.copy())
     kd: list[float] = field(default_factory=lambda: _DEFAULT_KD.copy())
 

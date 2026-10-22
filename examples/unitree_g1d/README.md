@@ -1,3 +1,18 @@
+# Server side
+
+ssh unitree@192.168.0.89
+
+1
+
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate lerobot
+
+
+(unitree_lerobot) unitree@ubuntu:~$ cd Documents/lerobot_unitree/lerobot
+python src/lerobot/robots/unitree_g1/run_g1_server.py
+
+
+
 # Read G1-D upper-body state
 
 This is the read-only integration milestone. It subscribes directly to `rt/lowstate`
@@ -38,3 +53,7 @@ with robot:
 The class uses the existing dynamic robot factory. Recording/teleoperation CLI
 registration is outside this read-only milestone. Hardware validation is still
 required; unit tests use mocked SDK subscriptions.
+
+## Offline arm IK
+
+See [the arm IK guide](IK_README.md) for torso-relative wrist targets using the existing G1 solver, without connecting to a robot.

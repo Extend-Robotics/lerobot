@@ -159,6 +159,7 @@ class UnitreeG1(Robot):
         logger.info("Initialize UnitreeG1...")
 
         self.config = config
+        self.control_space = config.control_space
         self.control_dt = config.control_dt
 
         # Initialize cameras config (ZMQ-based) - actual connection in connect()
@@ -194,7 +195,7 @@ class UnitreeG1(Robot):
         self._shutdown_event = threading.Event()
         self.subscribe_thread: threading.Thread | None = None
 
-        self.arm_ik = G1_29_ArmIK() if config.gravity_compensation else None
+        self.arm_ik = G1_29_ArmIK() if config.gravity_compensation or self.control_space != "joint" else None
 
         # Controller loaded dynamically
         self.controller: RobotController | None = make_robot_controller(config.controller)
@@ -289,10 +290,22 @@ class UnitreeG1(Robot):
         # action space over to the controller.
         controller_ft = getattr(self.controller, "observation_ft", None)
         proprio_ft = self._motors_ft if controller_ft is None else dict(controller_ft)
-        return {**proprio_ft, **self._cameras_ft}
+        tcp_ft = self._cartesian_ft if self.control_space != "joint" else {}
+        return {**proprio_ft, **tcp_ft, **self._cameras_ft}
+
+    @property
+    def _cartesian_ft(self) -> dict[str, type]:
+        return {
+            f"{side}_tcp.{field}": float
+            for side in ("left", "right")
+            for field in ("x", "y", "z", "r1", "r2", "r3", "r4", "r5", "r6")
+        }
 
     @cached_property
     def action_features(self) -> dict[str, type]:
+        if self.control_space != "joint":
+            return self._cartesian_ft
+
         # No controller configured at all: raw 29-DoF joint teleop.
         if self.controller is None:
             return {f"{G1_29_JointIndex(motor).name}.q": float for motor in G1_29_JointIndex}
@@ -512,6 +525,16 @@ class UnitreeG1(Robot):
             obs[f"{name}.dq"] = lowstate.motor_state[idx].dq
             obs[f"{name}.tau"] = lowstate.motor_state[idx].tau_est
 
+        if self.control_space != "joint":
+            arm_q = np.array([lowstate.motor_state[joint].q for joint in G1_29_JointArmIndex])
+            poses = self.arm_ik.forward_kinematics(arm_q)
+            for side, pose in zip(("left", "right"), poses, strict=True):
+                values = np.concatenate((pose[:3, 3], pose[:3, 0], pose[:3, 1]))
+                fields = ("x", "y", "z", "r1", "r2", "r3", "r4", "r5", "r6")
+                obs.update(
+                    {f"{side}_tcp.{key}": float(value) for key, value in zip(fields, values, strict=True)}
+                )
+
         # IMU - gyroscope
         if lowstate.imu_state.gyroscope:
             obs["imu.gyro.x"] = lowstate.imu_state.gyroscope[0]
@@ -556,6 +579,11 @@ class UnitreeG1(Robot):
         return obs
 
     def send_action(self, action: RobotAction) -> RobotAction:
+        if self.control_space != "joint":
+            with self._control_lock:
+                self._send_cartesian_action(action)
+            return action
+
         action_to_publish = action
         if self.controller is not None:
             # Controller thread owns legs/waist. Here we only update joystick inputs
@@ -591,6 +619,45 @@ class UnitreeG1(Robot):
 
         self.publish_lowcmd(action_to_publish, tau=tau)
         return action
+
+    def _send_cartesian_action(self, action: RobotAction) -> None:
+        """Control both arms with Pico4 TCP fields (metres and two rotation columns).
+
+        Absolute targets use the IK model's base frame. Relative translations and
+        rotations are increments in that frame, applied to the measured TCP poses:
+        p_target = p_current + dp, R_target = dR @ R_current.
+        Identity rotation is encoded as r1-r6 = [1, 0, 0, 0, 1, 0].
+        """
+        with self._lowstate_lock:
+            arm_q = np.array([self._lowstate.motor_state[joint].q for joint in G1_29_JointArmIndex])
+
+        targets = []
+        for side in ("left", "right"):
+            prefix = f"{side}_tcp"
+            first = np.array([action[f"{prefix}.r{i}"] for i in (1, 2, 3)])
+            second = np.array([action[f"{prefix}.r{i}"] for i in (4, 5, 6)])
+            first = first / np.linalg.norm(first)
+            second = second - np.dot(first, second) * first
+            second = second / np.linalg.norm(second)
+            target = np.eye(4)
+            target[:3, :3] = np.column_stack((first, second, np.cross(first, second)))
+            target[:3, 3] = [action[f"{prefix}.{axis}"] for axis in ("x", "y", "z")]
+            targets.append(target)
+
+        if self.control_space == "cartesian_rel":
+            current_poses = self.arm_ik.forward_kinematics(arm_q)
+            for target, current in zip(targets, current_poses, strict=True):
+                target[:3, 3] += current[:3, 3]
+                target[:3, :3] = target[:3, :3] @ current[:3, :3]
+
+        target_q, arm_tau = self.arm_ik.solve_ik(targets[0], targets[1], arm_q)
+        joint_action = {f"{joint.name}.q": float(target_q[i]) for i, joint in enumerate(G1_29_JointArmIndex)}
+        tau = None
+        if self.config.gravity_compensation:
+            tau = np.zeros(NUM_MOTORS)
+            for i, joint in enumerate(G1_29_JointArmIndex):
+                tau[joint] = arm_tau[i]
+        self.publish_lowcmd(joint_action, tau=tau)
 
     def _update_controller_action(self, action: RobotAction) -> None:
         """Forward incoming teleop action values into ``controller_input``; each controller

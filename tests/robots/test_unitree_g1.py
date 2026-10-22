@@ -532,6 +532,79 @@ class TestSendAction:
 
 
 # ---------------------------------------------------------------------------
+# Cartesian arm control
+# ---------------------------------------------------------------------------
+
+
+class TestCartesianControl:
+    @pytest.mark.parametrize("control_space", ["cartesian_abs", "cartesian_rel"])
+    def test_features_and_observation(self, make_robot, control_space):
+        from lerobot.robots.unitree_g1.unitree_g1 import G1_29_LowState
+
+        factory, _ = make_robot
+        robot = factory(control_space=control_space)
+        robot._lowstate = G1_29_LowState()
+        pose = np.eye(4)
+        pose[:3, 3] = [0.3, 0.2, 0.5]
+        pose[:3, :3] = [[0, -1, 0], [1, 0, 0], [0, 0, 1]]
+        robot.arm_ik.forward_kinematics.return_value = (pose, pose)
+
+        observation = robot.get_observation()
+
+        assert len(robot.action_features) == 18
+        assert robot.action_features.keys() <= robot.observation_features.keys()
+        for side in ("left", "right"):
+            values = [
+                observation[f"{side}_tcp.{key}"]
+                for key in ("x", "y", "z", "r1", "r2", "r3", "r4", "r5", "r6")
+            ]
+            np.testing.assert_allclose(values, [0.3, 0.2, 0.5, 0, 1, 0, -1, 0, 0])
+
+    @pytest.mark.parametrize("control_space", ["cartesian_abs", "cartesian_rel"])
+    @pytest.mark.parametrize("gravity_compensation", [False, True])
+    def test_targets_and_arm_only_publish(self, make_robot, control_space, gravity_compensation):
+        from lerobot.robots.unitree_g1.unitree_g1 import G1_29_LowState
+
+        factory, mocks = make_robot
+        robot = arm_for_publish(factory(control_space=control_space), mocks)
+        robot.config.gravity_compensation = gravity_compensation
+        robot._lowstate = G1_29_LowState()
+        measured_q = np.linspace(-0.1, 0.1, 14)
+        for joint, value in zip(G1_29_JointArmIndex, measured_q, strict=True):
+            robot._lowstate.motor_state[joint].q = value
+        current = np.eye(4)
+        current[:3, 3] = [0.3, 0.2, 0.5]
+        current[:3, :3] = [[1, 0, 0], [0, 0, -1], [0, 1, 0]]
+        robot.arm_ik.forward_kinematics.return_value = (current, current)
+        target_q = np.linspace(0.0, 0.5, 14)
+        robot.arm_ik.solve_ik.return_value = (target_q, np.arange(14))
+        fields = ("x", "y", "z", "r1", "r2", "r3", "r4", "r5", "r6")
+        action = {
+            f"{side}_tcp.{key}": value
+            for side in ("left", "right")
+            for key, value in zip(fields, [0.01, 0.02, 0.03, 0, 1, 0, -1, 0, 0], strict=True)
+        }
+        action["kLeftHipPitch.q"] = 1.0  # Cartesian actions never command legs.
+
+        assert robot.send_action(action) == action
+
+        left, right, seed = robot.arm_ik.solve_ik.call_args.args
+        expected = np.eye(4)
+        expected[:3, 3] = [0.01, 0.02, 0.03]
+        expected[:3, :3] = [[0, -1, 0], [1, 0, 0], [0, 0, 1]]
+        if control_space == "cartesian_rel":
+            expected[:3, 3] += current[:3, 3]
+            expected[:3, :3] = expected[:3, :3] @ current[:3, :3]
+        np.testing.assert_allclose(left, expected)
+        np.testing.assert_allclose(right, expected)
+        np.testing.assert_allclose(seed, measured_q)
+        for i, joint in enumerate(G1_29_JointArmIndex):
+            assert robot.msg.motor_cmd[joint].q == pytest.approx(target_q[i])
+            assert robot.msg.motor_cmd[joint].tau == (i if gravity_compensation else 0.0)
+        assert all(robot.msg.motor_cmd[i].q == -1.0 for i in range(15))
+
+
+# ---------------------------------------------------------------------------
 # Reset
 # ---------------------------------------------------------------------------
 

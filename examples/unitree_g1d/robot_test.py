@@ -31,13 +31,13 @@ def main() -> None:
     parser.add_argument("--duration", type=float, default=10.0)
     parser.add_argument("--move-elbows", action="store_true", help="Enable elbow motion (default: read only)")
     parser.add_argument(
-        "--amplitude", type=float, default=0.03, help="Peak elbow offset in radians (max 0.05)"
+        "--amplitude", type=float, default=0.1, help="Peak elbow offset in radians (max 0.05)"
     )
     parser.add_argument("--frequency", type=float, default=0.2, help="Sinusoid frequency in Hz (max 0.5)")
     args = parser.parse_args()
     if not math.isfinite(args.duration) or args.duration <= 0:
         parser.error("--duration must be finite and positive")
-    if not math.isfinite(args.amplitude) or not 0 < args.amplitude <= 0.05:
+    if not math.isfinite(args.amplitude) or not 0 < args.amplitude <= 0.1:
         parser.error("--amplitude must be in (0, 0.05] radians")
     if not math.isfinite(args.frequency) or not 0 < args.frequency <= 0.5:
         parser.error("--frequency must be in (0, 0.5] Hz")
