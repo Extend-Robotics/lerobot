@@ -1,91 +1,104 @@
-# PICO controllers to G1-D arms: MVP
+# PICO controllers to G1-D: Unitree XR mapping and IK
 
-This example connects the existing BiPico4 mapping to G1 arm FK/IK and the
-existing socket bridge. No robot-side update or reinstall is needed.
+The default launcher now uses the G1-29 controller mapping, IK objective, solver
+options, joint filter, gravity feedforward and arm gains from
+[`unitreerobotics/xr_teleoperate`](https://github.com/unitreerobotics/xr_teleoperate/tree/817fb00c63cde15e5f24a0f8fa08e1e33ed89d3b).
+Source revisions and licenses are recorded in [UNITREE_XR_NOTICES.md](UNITREE_XR_NOTICES.md).
+The native PICO SDK and the existing robot-side JSON/ZMQ-to-DDS bridge remain the
+hardware adapters. No robot-side update or reinstall is needed.
 
 ## Launch
 
 Keep the usual robot-side `run_g1_server.py` bridge running. Stop other robot
-command writers and headset consumers, then start the PICO service/headset app:
+command writers and headset consumers. Start the PICO service/headset app:
 
 ```bash
 bash scripts/pico4/start_service.sh
 ```
 
-Preview using live robot feedback without publishing commands, including on exit:
+Enable headset and both controller tracking in the headset app, then preview
+using live robot feedback without publishing any commands, including on exit:
 
 ```bash
 bash scripts/pico4/teleop_g1d.sh --robot-ip <ROBOT_IP>
 ```
 
-Enable arm commands for a supervised hardware trial:
+Preview uses ideal virtual joint feedback and follows both controllers immediately.
+Inspect the absolute targets before enabling physical movement:
 
 ```bash
 bash scripts/pico4/teleop_g1d.sh --robot-ip <ROBOT_IP> --execute
 ```
 
+Execution waits for `r` followed by Enter. `q` followed by Enter or Ctrl+C exits.
+Use an interactive terminal for execution. **Starting moves both arms toward the
+absolute tracked poses. Grips no longer clutch or rebase an arm.** Triggers and
+A/B/X/Y do not control the arms. Looking around changes the head-yaw reference,
+as in upstream's default mapping.
+
 The launcher uses `../envs/unitree-g1/bin/python`. Override with
 `PICO_G1_PYTHON=/path/to/python` for another environment containing LeRobot,
-Unitree SDK, Pinocchio with CasADi, and the PICO SDK. Install the PICO binding
-into a new environment with `PICO_PYTHON=/path/to/python bash scripts/pico4/install_sdk.sh`.
-If `.venv` contains all dependencies, run directly with:
+Unitree SDK, Pinocchio with CasADi, and the PICO SDK. Install the PICO binding with
+`PICO_PYTHON=/path/to/python bash scripts/pico4/install_sdk.sh` if needed.
 
-```bash
-uv run --no-sync python examples/unitree_g1d/teleop_pico4.py --robot-ip <ROBOT_IP>
+## Upstream behavior
+
+Raw SDK poses use `[x,y,z,qx,qy,qz,qw]`; they are converted to SE(3) matrices.
+The controller path then applies televuer's OpenXR-to-robot basis change,
+subtracts the headset position, removes headset yaw from wrist translation and
+rotation, and adds the fixed head-to-waist translation `[0.15, 0, 0.45]` metres.
+There is no grip offset, translation/rotation sensitivity scaling, Cartesian
+jump filter, or Cartesian output rate limiter in this path. The former
+`--position-scale` and `--orientation-scale` options have been removed.
+
+The IK uses the existing G1-29 model with legs, waist and fingers fixed at zero,
+and the upstream 5 cm wrist tool frames. Its objective is:
+
+```text
+50 * squared_position_error
++ squared_rotation_error
++ 0.02 * squared_joint_angles
++ 0.1 * squared_distance_from_measured_joints
 ```
 
-## Controls
+The IPOPT settings match G1-29 upstream: 30 iterations, tolerance `1e-4`,
+acceptable tolerance `5e-4`, five acceptable iterations, expansion, simple-bound
+detection, warm-start option, and exact Jacobians. Each solve starts from measured
+joints. The joint filter weights are `[0.4, 0.3, 0.2, 0.1]`, newest first, with
+upstream's duplicate-sample behavior. Gravity torques are calculated from the
+filtered solution and delivered to the arm motor slots.
 
-Startup waits up to 15 seconds for both controller poses, reporting which side
-is missing. The headset can show a connection before tracking data arrives.
+IK runs at 30 Hz by default (`--fps` can override it). An independent 250 Hz
+publisher clips the target against **measured** joints, scaling the full
+14-joint vector with upstream's `30 rad/s` parameter and fixed 4 ms period.
+Shoulder/elbow gains are `kp=80, kd=3`; wrist gains are `kp=40, kd=1.5`.
+Preview bypasses clipping, matching upstream simulation behavior.
 
-Release both grips after startup, then squeeze either grip to move its arm.
-Releasing a grip holds the last commanded joints. Re-engagement starts from
-that held pose. Triggers and A/B/X/Y are ignored. Ctrl+C exits.
+## G1-D and transport adaptations
 
-The loop reads inputs, solves IK once, preserves inactive arm joints, applies
-a joint speed limit, and optionally publishes. Pico owns grip hysteresis;
-there is no second session-level grip state machine. Preview advances virtual
-joint commands without requiring the physical robot to follow them.
+This ports the upstream G1-29 arm/controller path, not its whole-body operation:
+legs remain passive; waist yaw/pitch hold their connect-time targets with
+`kp=300, kd=3`; waist roll remains passive. The G1-29 kinematic model is retained;
+G1-D geometry, payload and physical tracking still need hardware validation.
+The shared default LeRobot IK and legacy clutched session remain available to
+other callers; the launcher selects `arm_ik_profile="unitree_xr"`.
 
-Faults print a reason and exit through normal cleanup. Restart the script to
-retry. There is no automatic recovery or rearming. In execution, cleanup makes
-arms and waist passive, removing their support torque. Support the arms/torso
-accordingly. During execution the waist holds its connect-time targets and the
-legs remain passive, using the same gains as `robot_test.py`.
+The host publishes through the existing bridge, rather than direct DDS, so 250 Hz
+is a requested host loop rate, not a hard real-time delivery guarantee. The
+publisher is stopped before disconnect sends the existing passive command.
 
-## Tuning and diagnostics
+The adapter retains a 0.25 s PICO stream / IK deadline and enables the existing
+robot-feedback age check. Invalid tracking, expired targets, failed IK or
+publication failure stops execution instead of following invalid solver iterates.
+The publisher attempts to make the robot passive on its own failure. Normal
+cleanup makes arms and waist passive, removing their support torque. Support
+the arms/torso accordingly. There is no robot-side network-loss watchdog,
+collision checking, or guarantee of cleanup after process kill/network loss.
 
-CLI options are `--robot-ip`, `--execute`, `--duration` (0 means until Ctrl+C),
-`--fps` (default 30), `--position-scale`, and `--orientation-scale` (both 0.25).
-
-There are no position or orientation bounds relative to the starting wrist poses.
-
-MVP bounds are named constants in `src/lerobot/robots/unitree_g1/pico_teleop.py`:
-0.25 s PICO stream/control-deadline timeout, 0.3 rad/s joint speed, and 0.25 rad
-tracking error during execution. IK residuals are printed
-as diagnostics rather than causing faults. This path bypasses the IK moving
-filter and Pico Cartesian rate limits, using the final joint speed limit.
-
-Targets use the reduced IK model's base frame, with legs and waist fixed at
-zero and the existing 5 cm wrist tool frames. Mapped axes are +X forward,
-+Y left, +Z up; verify their physical directions in preview.
-
-The Pico MVP uses the latest available robot feedback without rejecting it
-based on age. The shared publisher retains age checking by default; this
-example explicitly opts out. PICO freshness uses its stream timestamp, which cannot detect a single frozen controller in
-otherwise advancing packets. Invalid samples, failed IK, joint-limit violations,
-and stale PICO input stop the script.
-
-Cleanup is best-effort over the bridge. There is no robot-side watchdog,
-collision checking, or guarantee of stopping on process kill/network loss.
-Native calls can delay cleanup until they return. Integrated physical motion
-still needs to be verified on hardware.
-
-## Software checks
+## Offline validation
 
 ```bash
-uv run --no-sync pytest tests/robots/test_pico_g1_teleop.py tests/robots/test_g1_kinematics.py tests/robots/test_unitree_g1.py tests/robots/test_unitree_g1_utils.py tests/teleoperators/test_pico4.py -q
+uv run --no-sync pytest tests/robots/test_unitree_xr.py tests/robots/test_g1_kinematics.py tests/robots/test_pico_g1_teleop.py tests/robots/test_unitree_g1.py tests/robots/test_unitree_g1_utils.py tests/teleoperators/test_pico4.py -q
 ```
 
-These checks use mocks and synthetic feedback; they do not move hardware.
+Tests use mocks, synthetic tracking and optional native IK. They do not move hardware.

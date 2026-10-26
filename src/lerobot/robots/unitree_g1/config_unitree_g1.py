@@ -51,6 +51,8 @@ _DEFAULT_KP, _DEFAULT_KD = _build_gains()
 class UnitreeG1Config(RobotConfig):
     # Cartesian modes control only the arms, using left_tcp/right_tcp.{x,y,z,r1-r6}.
     control_space: Literal["joint", "cartesian_abs", "cartesian_rel"] = "joint"
+    # Unitree's G1-29 XR objective, IPOPT options and output filter.
+    arm_ik_profile: Literal["lerobot", "unitree_xr"] = "lerobot"
     # Read-only suppresses all command writes. Arm-only freezes waist targets and disables legs.
     read_only: bool = False
     arm_commands_only: bool = False

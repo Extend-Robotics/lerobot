@@ -197,7 +197,11 @@ class UnitreeG1(Robot):
         self._shutdown_event = threading.Event()
         self.subscribe_thread: threading.Thread | None = None
 
-        self.arm_ik = G1_29_ArmIK() if config.gravity_compensation or self.control_space != "joint" else None
+        self.arm_ik = (
+            G1_29_ArmIK(unitree_xr=config.arm_ik_profile == "unitree_xr")
+            if config.gravity_compensation or self.control_space != "joint"
+            else None
+        )
 
         # Controller loaded dynamically
         self.controller: RobotController | None = make_robot_controller(config.controller)
@@ -613,7 +617,12 @@ class UnitreeG1(Robot):
         return float("inf") if received_at is None else time.monotonic() - received_at
 
     def send_arm_joint_action(
-        self, action: dict[str, float], max_state_age_s: float, *, check_state_age: bool = True
+        self,
+        action: dict[str, float],
+        max_state_age_s: float,
+        *,
+        check_state_age: bool = True,
+        arm_tau: np.ndarray | None = None,
     ) -> None:
         """Publish checked IK results; Pico MVP may explicitly opt out of feedback age checks."""
         if not np.isfinite(max_state_age_s) or max_state_age_s <= 0:
@@ -625,7 +634,15 @@ class UnitreeG1(Robot):
             raise ValueError("Prepared arm commands require arm-only mode without a controller")
         if check_state_age and self.state_age_s() > max_state_age_s:
             raise TimeoutError("Robot feedback is stale")
-        self.publish_lowcmd(action)
+        tau = None
+        if arm_tau is not None:
+            arm_tau = np.asarray(arm_tau, dtype=float)
+            if arm_tau.shape != (14,) or not np.isfinite(arm_tau).all():
+                raise ValueError("Expected 14 finite arm feedforward torques")
+            tau = np.zeros(NUM_MOTORS)
+            for index, joint in enumerate(G1_29_JointArmIndex):
+                tau[joint.value] = arm_tau[index]
+        self.publish_lowcmd(action, tau=tau)
 
     def send_action(self, action: RobotAction) -> RobotAction:
         if self.control_space != "joint":

@@ -537,6 +537,20 @@ class TestSendAction:
 
 
 class TestCartesianControl:
+    def test_prepared_arm_feedforward_torques_reach_only_arm_slots(self, make_robot):
+        factory, mocks = make_robot
+        robot = arm_for_publish(factory(arm_commands_only=True), mocks)
+        robot._lowstate_received_at = time.monotonic()
+        action = {f"{joint.name}.q": 0.1 for joint in G1_29_JointArmIndex}
+        torques = np.arange(14, dtype=float)
+        robot.send_arm_joint_action(action, 0.25, arm_tau=torques)
+        for index, joint in enumerate(G1_29_JointArmIndex):
+            assert robot.msg.motor_cmd[joint].tau == torques[index]
+        assert all(m.tau == 0 for m in robot.msg.motor_cmd[:15])
+        for invalid in (np.zeros(13), np.full(14, np.nan)):
+            with pytest.raises(ValueError, match="feedforward"):
+                robot.send_arm_joint_action(action, 0.25, arm_tau=invalid)
+
     def test_readonly_has_no_publisher_or_shutdown_write(self, make_robot):
         factory, mocks = make_robot
         robot = factory(read_only=True)

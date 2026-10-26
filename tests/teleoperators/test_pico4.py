@@ -100,6 +100,23 @@ def test_control_status_uses_stream_timestamp_and_validates_raw_pose(sdk):
         teleop.disconnect()
 
 
+def test_raw_xr_sample_includes_head_and_bypasses_clutch_mapping(sdk):
+    sdk.get_headset_pose.return_value = [0, 1.5, 0, 0, 0, 0, 1]
+    sdk.get_time_stamp_ns.return_value = 1234
+    teleop = BiPico4(BiPico4Config())
+    try:
+        teleop.connect()
+        stamp, poses = teleop.get_xr_sample()
+        assert stamp == 1234
+        np.testing.assert_array_equal(poses["head"], sdk.get_headset_pose.return_value)
+        assert set(poses) == {"head", "left", "right"}
+        sdk.get_headset_pose.return_value = [0] * 7
+        with pytest.raises(ValueError, match="head XR pose"):
+            teleop.get_xr_sample()
+    finally:
+        teleop.disconnect()
+
+
 def test_rebase_one_arm_preserves_other_target(sdk):
     teleop = BiPico4(BiPico4Config())
     try:

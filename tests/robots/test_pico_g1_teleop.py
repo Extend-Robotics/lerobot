@@ -264,7 +264,7 @@ def test_example_defaults_and_cleanup_order(monkeypatch, execute, shutdown_error
     make_robot = Mock(return_value=robot)
     monkeypatch.setattr(example, "UnitreeG1", make_robot)
     monkeypatch.setattr(example, "BiPico4", Mock(return_value=teleop))
-    monkeypatch.setattr(example, "PicoArmSession", Mock())
+    monkeypatch.setattr(example, "UnitreeXrArmSession", Mock())
     arguments = ["teleop_pico4.py", "--robot-ip", "mock", "--duration", "0.000000001"]
     if execute:
         arguments.append("--execute")
@@ -286,7 +286,11 @@ def test_example_defaults_and_cleanup_order(monkeypatch, execute, shutdown_error
     config = make_robot.call_args.args[0]
     assert config.read_only is not execute
     assert config.arm_commands_only
-    assert config.kp[:15] == [0.0] * 12 + [60.0, 0.0, 40.0]
+    assert config.arm_ik_profile == "unitree_xr"
+    assert config.gravity_compensation
+    assert config.kp[:15] == [0.0] * 12 + [300.0, 0.0, 300.0]
+    assert config.kp[15:] == ([80.0] * 4 + [40.0] * 3) * 2
+    assert config.kd[15:] == ([3.0] * 4 + [1.5] * 3) * 2
     assert closed == ["robot", "teleop"]
 
 
@@ -328,7 +332,7 @@ def test_example_fault_exits_and_cleans_up(monkeypatch):
     session.tick.side_effect = TimeoutError("PICO stream is stale")
     monkeypatch.setattr(example, "UnitreeG1", Mock(return_value=robot))
     monkeypatch.setattr(example, "BiPico4", Mock(return_value=teleop))
-    monkeypatch.setattr(example, "PicoArmSession", Mock(return_value=session))
+    monkeypatch.setattr(example, "UnitreeXrArmSession", Mock(return_value=session))
     monkeypatch.setattr(sys, "argv", ["teleop_pico4.py", "--robot-ip", "mock"])
     with pytest.raises(SystemExit) as exc:
         example.main()

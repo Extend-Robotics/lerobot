@@ -1,19 +1,21 @@
 #!/usr/bin/env python
-"""Preview PICO-to-G1-D arm IK, or explicitly enable arm execution with --execute."""
+"""Unitree XR mapping/IK for G1-D; preview by default, --execute enables commands."""
 
 import argparse
 import json
 import logging
 import math
+import select
+import sys
 import time
 
 from lerobot.robots.unitree_g1 import UnitreeG1, UnitreeG1Config
-from lerobot.robots.unitree_g1.pico_teleop import PicoArmSession
+from lerobot.robots.unitree_g1.unitree_xr import ARM_KD, ARM_KP, UnitreeXrArmSession
 from lerobot.teleoperators.bi_pico4 import BiPico4, BiPico4Config
 
 
 def main() -> None:
-    """Connect measured robot wrists to clutched controllers, initially read-only."""
+    """Follow absolute, head-yaw-relative wrist targets using upstream G1-29 tuning."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--robot-ip", required=True)
     parser.add_argument(
@@ -21,30 +23,24 @@ def main() -> None:
     )
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--duration", type=float, default=0.0, help="Seconds; 0 runs until Ctrl+C")
-    parser.add_argument("--position-scale", type=float, default=0.5)
-    parser.add_argument("--orientation-scale", type=float, default=0.5)
     args = parser.parse_args()
     if not math.isfinite(args.fps) or not 1 <= args.fps <= 100:
         parser.error("--fps must be between 1 and 100")
     if not math.isfinite(args.duration) or args.duration < 0:
         parser.error("--duration must be finite and nonnegative")
-    if any(
-        not math.isfinite(value) or not 0 < value <= 1
-        for value in (args.position_scale, args.orientation_scale)
-    ):
-        parser.error("Controller scales must be in (0, 1]")
     logging.basicConfig(level=logging.INFO)
     config = UnitreeG1Config(
         robot_ip=args.robot_ip,
         is_simulation=False,
         control_space="cartesian_abs",
+        arm_ik_profile="unitree_xr",
         controller=None,
-        gravity_compensation=False,
+        gravity_compensation=True,
         cameras={},
         read_only=not args.execute,
         arm_commands_only=True,
-        kp=[0.0] * 12 + [60.0, 0.0, 40.0] + [40.0] * 14,
-        kd=[0.0] * 12 + [1.0, 0.0, 1.0] + [1.0] * 14,
+        kp=[0.0] * 12 + [300.0, 0.0, 300.0] + ARM_KP,
+        kd=[0.0] * 12 + [3.0, 0.0, 3.0] + ARM_KD,
     )
     try:
         robot = UnitreeG1(config)
@@ -53,33 +49,37 @@ def main() -> None:
             2,
             f"Missing dependency: {exc}. Pinocchio must include pinocchio.casadi; see docs/source/unitree_g1.mdx.\n",
         )
-    teleop = BiPico4(
-        BiPico4Config(
-            pos_sensitivity=args.position_scale,
-            ori_sensitivity=args.orientation_scale,
-            max_pos_velocity=0.0,
-            max_rot_velocity=0.0,
-        )
-    )
+    # Raw SDK poses bypass BiPico4's clutch, scaling, jump filter and Cartesian limits.
+    teleop = BiPico4(BiPico4Config())
+    session = None
     try:
         robot.connect()
-        session = PicoArmSession(robot, teleop)
+        session = UnitreeXrArmSession(robot, teleop)
         session.initialize()
         print(
-            "EXECUTION ENABLED: faults and shutdown make arms passive."
+            "EXECUTION ENABLED: r + Enter starts both arms; q + Enter exits."
             if args.execute
             else "READ-ONLY PREVIEW: no robot commands will be published.",
             flush=True,
         )
         print(
-            "Release both grips, then squeeze either grip. Triggers and A/B/X/Y are ignored. Ctrl+C exits.",
+            "Absolute Unitree XR mapping: headset yaw sets forward; grips do not clutch. Ctrl+C exits.",
             flush=True,
         )
+        if not args.execute:
+            session.start()
+        session.start_publisher()
         start = time.monotonic()
         next_print = start
         previous_status = None
         while not args.duration or time.monotonic() - start < args.duration:
             tick = time.monotonic()
+            if sys.stdin.isatty() and select.select([sys.stdin], [], [], 0)[0]:
+                key = sys.stdin.readline().strip().lower()
+                if key == "q":
+                    break
+                if key == "r":
+                    session.start()
             report = session.tick()
             status = (report["status"], report.get("reason"))
             if tick >= next_print or status != previous_status:
@@ -93,12 +93,16 @@ def main() -> None:
         logging.error("Teleop stopped: %s. Restart the script to retry.", exc)
         raise SystemExit(1) from exc
     finally:
-        # Remove torque before closing the SDK, which may wait for its native threads.
+        # Stop the command writer before making arms passive, then close native tracking.
         try:
-            robot.disconnect()
+            if session is not None:
+                session.close()
         finally:
-            if teleop.is_connected:
-                teleop.disconnect()
+            try:
+                robot.disconnect()
+            finally:
+                if teleop.is_connected:
+                    teleop.disconnect()
 
 
 if __name__ == "__main__":

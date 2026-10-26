@@ -341,6 +341,22 @@ class BiPico4(Teleoperator):
         """Return grip enable states from the last get_action(), with Pico hysteresis."""
         return {"left": self._left_pico4._enabled, "right": self._right_pico4._enabled}
 
+    def get_xr_sample(self) -> tuple[int, dict[str, np.ndarray]]:
+        """Read raw SDK [x,y,z,qx,qy,qz,qw] poses, bypassing clutch mapping."""
+        if not self.is_connected or self._xrt is None:
+            raise DeviceNotConnectedError("PICO is disconnected")
+        poses = {}
+        for name, getter in (
+            ("head", "get_headset_pose"),
+            ("left", "get_left_controller_pose"),
+            ("right", "get_right_controller_pose"),
+        ):
+            pose = np.asarray(getattr(self._xrt, getter)(), dtype=float)
+            if pose.shape != (7,) or not np.isfinite(pose).all() or np.linalg.norm(pose[3:]) < 1e-6:
+                raise ValueError(f"Invalid {name} XR pose; enable headset and controller tracking")
+            poses[name] = pose.copy()
+        return int(self._xrt.get_time_stamp_ns()), poses
+
     def get_control_status(self) -> tuple[int, dict[str, float]]:
         """Return source-stream timestamp and grips, rejecting invalid raw poses.
 

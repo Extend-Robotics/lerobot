@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 
 # Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Upstream XR profile: Copyright 2025 Unitree Robotics, Apache-2.0.
+# See examples/unitree_g1d/UNITREE_XR_NOTICES.md for source revisions and notices.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,9 +26,11 @@ logger = logging.getLogger(__name__)
 
 
 class WeightedMovingFilter:
-    def __init__(self, weights, data_size=14):
+    def __init__(self, weights, data_size=14, *, newest_first: bool = False):
         self._window_size = len(weights)
         self._weights = np.array(weights)
+        if newest_first:
+            self._weights = self._weights[::-1]
         self._data_size = data_size
         self._filtered_data = np.zeros(self._data_size)
         self._data_queue = deque(maxlen=self._window_size)
@@ -55,7 +59,7 @@ class WeightedMovingFilter:
 
 
 class G1_29_ArmIK:  # noqa: N801
-    def __init__(self, unit_test=False):
+    def __init__(self, unit_test=False, *, unitree_xr: bool = False):
         import casadi
         import pinocchio as pin
         from huggingface_hub import snapshot_download
@@ -213,17 +217,37 @@ class G1_29_ArmIK:  # noqa: N801
                 self.reduced_robot.model.upperPositionLimit,
             )
         )
-        self.opti.minimize(50 * self.translational_cost + self.rotation_cost + 0.1 * self.smooth_cost)
+        objective = 50 * self.translational_cost + self.rotation_cost + 0.1 * self.smooth_cost
+        if unitree_xr:
+            # xr_teleoperate G1_29_ArmIK: bias redundant joints toward zero.
+            objective += 0.02 * casadi.sumsqr(self.var_q)
+        self.opti.minimize(objective)
 
         opts = {
             "ipopt": {"print_level": 0, "max_iter": 50, "tol": 1e-6},
             "print_time": False,  # print or not
             "calc_lam_p": False,  # https://github.com/casadi/casadi/wiki/FAQ:-Why-am-I-getting-%22NaN-detected%22in-my-optimization%3F
         }
+        if unitree_xr:
+            opts = {
+                "expand": True,
+                "detect_simple_bounds": True,
+                "calc_lam_p": False,
+                "print_time": False,
+                "ipopt.sb": "yes",
+                "ipopt.print_level": 0,
+                "ipopt.max_iter": 30,
+                "ipopt.tol": 1e-4,
+                "ipopt.acceptable_tol": 5e-4,
+                "ipopt.acceptable_iter": 5,
+                "ipopt.warm_start_init_point": "yes",
+                "ipopt.derivative_test": "none",
+                "ipopt.jacobian_approximation": "exact",
+            }
         self.opti.solver("ipopt", opts)
 
         self.init_data = np.zeros(self.reduced_robot.model.nq)
-        self.smooth_filter = WeightedMovingFilter(np.array([0.4, 0.3, 0.2, 0.1]), 14)
+        self.smooth_filter = WeightedMovingFilter(np.array([0.4, 0.3, 0.2, 0.1]), 14, newest_first=unitree_xr)
         self.last_solve_success = False
 
     def forward_kinematics(self, arm_q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
