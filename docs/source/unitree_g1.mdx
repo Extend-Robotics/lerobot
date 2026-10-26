@@ -394,3 +394,90 @@ On connect, the robot eases every joint to the decoder's `default_angles` before
 ---
 
 _Last updated: July 2026_
+
+## BrainCo Revo2 hands
+
+Each hand is a standalone LeRobot `BraincoRevo2Hand` robot. `UnitreeG1` can own
+optional `left_hand` and `right_hand` configurations and merges their features
+into its body interface. Hands work with joint, Cartesian and controller-based
+body action spaces. Revo2 simulation is not implemented; configuring hands with
+`is_simulation=True` raises an error.
+
+Install the existing `pyzmq-dep` extra for standalone remote ZMQ access
+(or `unitree_g1` when composing with the G1). Direct DDS access and the
+robot-side bridge also require the official `unitree-sdk2py` installation described
+above and a running BrainCo hand driver. This adapter talks to the driver's
+`rt/brainco/{left,right}/state` and `rt/brainco/{left,right}/cmd` topics; it does not
+implement a raw serial/CAN hand driver.
+
+### Read feedback first
+
+On the robot, read a single hand directly without opening command publishers:
+
+```bash
+python examples/unitree_g1d/read_hand_state.py --transport dds --side left
+python examples/unitree_g1d/read_hand_state.py --transport dds --side right
+```
+
+Use `--network-interface eth0` if necessary. DDS initialization is process-global;
+all DDS devices in a process must use the same domain and interface.
+
+For remote access, run the independent hand bridge on the robot:
+
+```bash
+python -m lerobot.robots.brainco_revo2.bridge --read-only
+```
+
+It can run alongside the existing G1 body bridge. It creates no body command
+publishers and does not release robot motion modes. Read both hands remotely by
+running this command once for each `--side`:
+
+```bash
+python examples/unitree_g1d/read_hand_state.py \
+  --transport zmq --robot-ip 192.168.0.89 --side left
+```
+
+The default ports are left command/state `6002/6003` and right command/state
+`6004/6005`. Read-only mode opens state ports only. Command operation requires
+running the bridge without `--read-only`. Client and server clocks must be
+synchronized for feedback age checks and command deadlines: expired commands are rejected rather than replayed after a network
+interruption.
+
+### Compose hands with G1
+
+```python
+from lerobot.robots.unitree_g1 import UnitreeG1, UnitreeG1Config
+from lerobot.robots.brainco_revo2 import BraincoRevo2HandConfig
+
+config = UnitreeG1Config(
+    is_simulation=False,
+    robot_ip="192.168.0.89",
+    read_only=True,
+    left_hand=BraincoRevo2HandConfig(),
+    right_hand=BraincoRevo2HandConfig(),
+)
+with UnitreeG1(config) as robot:
+    print({key: value for key, value in robot.get_observation().items() if "_hand." in key})
+```
+
+G1 supplies each child's side, robot IP and a unique default ID. Its read-only
+setting also disables writes for both hands. Omit a hand configuration to use
+only the other hand. Nested CLI fields are supported, for example
+`--robot.is_simulation=false --robot.left_hand.transport=zmq`.
+
+Each hand exposes six `.pos` float features in DDS motor order:
+`motor_0`, `motor_1`, `index`, `middle`, `ring`, `pinky`. The two thumb actuators
+retain neutral names because the upstream motor enums and retargeting labels
+conflict. Override `motor_names` only after verifying the installed driver's
+ordering. G1 prefixes these names with `left_hand.` or `right_hand.`.
+
+Position values are normalized `[0, 1]` (open to closed), unlike body `.q` values
+in radians. Observations contain measured positions. Commands require all six
+positions for each addressed hand, reject nonfinite values, clip to `[0, 1]`, and
+return the clipped action. Omitted hands receive no command; hand-only actions do
+not publish body commands. Connection waits for fresh feedback, stale feedback
+blocks reads and hand commands, and disconnect sends no hand gesture. G1 body
+reset does not reset the hands.
+
+XR skeleton retargeting and trigger-to-finger mappings belong in teleoperators or
+processors and are not included in this hardware adapter.

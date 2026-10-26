@@ -20,7 +20,7 @@ import importlib
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -30,6 +30,7 @@ from lerobot.cameras import DepthCamera, make_cameras_from_configs
 from lerobot.lerobot_types import RobotAction, RobotObservation
 from lerobot.utils.import_utils import _unitree_sdk_available, require_package
 
+from ..brainco_revo2 import BraincoRevo2Hand
 from ..robot import Robot
 from .config_unitree_g1 import UnitreeG1Config
 from .g1_kinematics import G1_29_ArmIK
@@ -162,6 +163,19 @@ class UnitreeG1(Robot):
         self.config = config
         self.control_space = config.control_space
         self.control_dt = config.control_dt
+        self.hands: dict[str, BraincoRevo2Hand] = {}
+        for side in ("left", "right"):
+            hand_config = getattr(config, f"{side}_hand")
+            if hand_config is not None:
+                self.hands[side] = BraincoRevo2Hand(
+                    replace(
+                        hand_config,
+                        side=side,
+                        robot_ip=config.robot_ip,
+                        read_only=config.read_only or hand_config.read_only,
+                        id=hand_config.id or f"{config.id or 'g1'}_{side}_hand",
+                    )
+                )
 
         # Initialize cameras config (ZMQ-based) - actual connection in connect()
         self._cameras = make_cameras_from_configs(config.cameras)
@@ -313,7 +327,7 @@ class UnitreeG1(Robot):
         controller_ft = getattr(self.controller, "observation_ft", None)
         proprio_ft = self._motors_ft if controller_ft is None else dict(controller_ft)
         tcp_ft = self._cartesian_ft if self.control_space != "joint" else {}
-        return {**proprio_ft, **tcp_ft, **self._cameras_ft}
+        return {**proprio_ft, **tcp_ft, **self._cameras_ft, **self._hand_features}
 
     @property
     def _cartesian_ft(self) -> dict[str, type]:
@@ -323,8 +337,20 @@ class UnitreeG1(Robot):
             for field in ("x", "y", "z", "r1", "r2", "r3", "r4", "r5", "r6")
         }
 
+    @property
+    def _hand_features(self) -> dict[str, type]:
+        return {
+            f"{side}_hand.{key}": value
+            for side, hand in self.hands.items()
+            for key, value in hand.action_features.items()
+        }
+
     @cached_property
     def action_features(self) -> dict[str, type]:
+        return {**self._body_action_features, **self._hand_features}
+
+    @property
+    def _body_action_features(self) -> dict[str, type]:
         if self.control_space != "joint":
             return self._cartesian_ft
 
@@ -389,13 +415,27 @@ class UnitreeG1(Robot):
             time.sleep(sleep_time)
 
     def calibrate(self) -> None:
-        # TODO: implement g1_29 calibration
-        pass
+        for hand in self.hands.values():
+            hand.calibrate()
 
     def configure(self) -> None:
-        pass
+        for hand in self.hands.values():
+            hand.configure()
 
-    def connect(self, calibrate: bool = True) -> None:  # connect to DDS
+    def connect(self, calibrate: bool = True) -> None:
+        if self.is_connected:
+            raise ConnectionError("UnitreeG1 is already connected")
+        self._shutdown_event.clear()
+        try:
+            # Establish hand feedback before body controllers can start commanding.
+            for hand in self.hands.values():
+                hand.connect(calibrate)
+            self._connect_body(calibrate)
+        except BaseException:
+            self.disconnect()
+            raise
+
+    def _connect_body(self, calibrate: bool = True) -> None:  # connect to DDS
         # Initialize DDS channel and simulation environment
         if self.config.is_simulation:
             from lerobot.envs import make_env
@@ -495,6 +535,12 @@ class UnitreeG1(Robot):
             logger.warning(f"Failed to send zero-torque on disconnect: {e}")
 
     def disconnect(self):
+        # Hand disconnect never sends a gesture. Close every hand even if one fails.
+        for side, hand in self.hands.items():
+            try:
+                hand.disconnect()
+            except Exception:
+                logger.exception("Failed to disconnect %s Revo2 hand", side)
         # Signal threads to stop and unblock any waits
         self._shutdown_event.set()
 
@@ -539,7 +585,11 @@ class UnitreeG1(Robot):
 
         # Disconnect cameras
         for cam in self._cameras.values():
-            cam.disconnect()
+            if cam.is_connected:
+                cam.disconnect()
+        with self._lowstate_lock:
+            self._lowstate = None
+            self._lowstate_received_at = None
 
     def get_observation(self) -> RobotObservation:
         with self._lowstate_lock:
@@ -608,6 +658,8 @@ class UnitreeG1(Robot):
             if isinstance(cam, DepthCamera) and cam.use_depth:
                 obs[f"{cam_name}_depth"] = cam.read_latest_depth()
 
+        for side, hand in self.hands.items():
+            obs.update({f"{side}_hand.{key}": value for key, value in hand.get_observation().items()})
         return obs
 
     def state_age_s(self) -> float:
@@ -645,6 +697,29 @@ class UnitreeG1(Robot):
         self.publish_lowcmd(action, tau=tau)
 
     def send_action(self, action: RobotAction) -> RobotAction:
+        if self.config.read_only:
+            raise PermissionError("Robot command publishing is disabled in read-only mode")
+        hand_actions: dict[str, RobotAction] = {}
+        body_action: RobotAction = {}
+        for key, value in action.items():
+            if key.startswith(("left_hand.", "right_hand.")):
+                side, hand_key = key.split("_hand.", 1)
+                if side not in self.hands:
+                    raise ValueError(f"No {side} hand is configured")
+                hand_actions.setdefault(side, {})[hand_key] = value
+            else:
+                body_action[key] = value
+        # Validate all hand actions before any component moves. Hand features are
+        # independent of Cartesian, locomotion and whole-body controller spaces.
+        for side, targets in hand_actions.items():
+            hand_actions[side] = self.hands[side].prepare_action(targets)
+        sent = self._send_body_action(body_action) if body_action else {}
+        for side, targets in hand_actions.items():
+            result = self.hands[side].send_action(targets)
+            sent.update({f"{side}_hand.{key}": value for key, value in result.items()})
+        return sent
+
+    def _send_body_action(self, action: RobotAction) -> RobotAction:
         if self.control_space != "joint":
             with self._control_lock:
                 self._send_cartesian_action(action)
@@ -729,12 +804,13 @@ class UnitreeG1(Robot):
 
     @property
     def is_calibrated(self) -> bool:
-        return True
+        return all(hand.is_calibrated for hand in self.hands.values())
 
     @property
     def is_connected(self) -> bool:
         with self._lowstate_lock:
-            return self._lowstate is not None
+            body_connected = self._lowstate is not None
+        return body_connected and all(hand.is_connected for hand in self.hands.values())
 
     @property
     def _motors_ft(self) -> dict[str, type]:

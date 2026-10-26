@@ -20,6 +20,7 @@ from typing import Literal
 from lerobot.cameras import CameraConfig
 from lerobot.envs.configs import G1EndEffector, UnitreeG1MujocoEnv
 
+from ..brainco_revo2.config_brainco_revo2 import BraincoRevo2HandConfig
 from ..config import RobotConfig
 
 _GAINS: dict[str, dict[str, list[float]]] = {
@@ -69,6 +70,10 @@ class UnitreeG1Config(RobotConfig):
     # Launch mujoco simulation
     is_simulation: bool = True
 
+    # Optional physical hands, independent of the simulation end-effector asset.
+    left_hand: BraincoRevo2HandConfig | None = None
+    right_hand: BraincoRevo2HandConfig | None = None
+
     # Supports dummy, dex1, dex3
     end_effector: G1EndEffector = G1EndEffector.DEX1
 
@@ -99,6 +104,10 @@ class UnitreeG1Config(RobotConfig):
         super().__post_init__()
         if (self.read_only or self.arm_commands_only) and self.controller is not None:
             raise ValueError("Read-only/arm-only operation cannot run a whole-body controller")
+        if self.is_simulation and (self.left_hand is not None or self.right_hand is not None):
+            raise ValueError(
+                "Revo2 hands require is_simulation=False; no Revo2 simulation model is available"
+            )
         self.end_effector = G1EndEffector(self.end_effector)  # from Python it is still a string
         self.sim_env = UnitreeG1MujocoEnv(
             publish_images=self.sim_publish_images,

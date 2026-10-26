@@ -834,3 +834,132 @@ class TestControllerInput:
 
         assert robot.controller_input["remote.lx"] == 0.25
         assert robot.controller_input["remote.ly"] == -0.5
+
+
+class TestRevo2Composition:
+    @staticmethod
+    def attach_hand(robot, side="left"):
+        hand = MagicMock(is_connected=True, is_calibrated=True)
+        hand.action_features = {f"motor_{i}.pos": float for i in range(6)}
+        hand.observation_features = hand.action_features
+        hand.get_observation.return_value = dict.fromkeys(hand.action_features, 0.2)
+        hand.prepare_action.side_effect = lambda action: action
+        hand.send_action.side_effect = lambda action: {
+            key: min(1, max(0, value)) for key, value in action.items()
+        }
+        robot.hands[side] = hand
+        return hand
+
+    @pytest.mark.parametrize("controller", [None, TokenController(), LocomotionOnlyController()])
+    @pytest.mark.parametrize("control_space", ["joint", "cartesian_abs", "cartesian_rel"])
+    def test_features_extend_every_body_space(self, make_robot, controller, control_space):
+        factory, _ = make_robot
+        robot = factory(controller=controller, control_space=control_space)
+        hand = self.attach_hand(robot)
+        assert set(robot.action_features) == set(robot._body_action_features) | {
+            f"left_hand.{key}" for key in hand.action_features
+        }
+        assert all(f"left_hand.{key}" in robot.observation_features for key in hand.observation_features)
+
+    @pytest.mark.parametrize("controller", [None, TokenController(), LocomotionOnlyController()])
+    @pytest.mark.parametrize("control_space", ["joint", "cartesian_abs", "cartesian_rel"])
+    def test_hand_only_action_never_publishes_body(self, make_robot, controller, control_space):
+        factory, mocks = make_robot
+        robot = factory(controller=controller, control_space=control_space)
+        hand = self.attach_hand(robot)
+        action = {f"left_hand.{key}": 2 for key in hand.action_features}
+        assert robot.send_action(action) == dict.fromkeys(action, 1)
+        hand.send_action.assert_called_once()
+        mocks["publisher_mock"].Write.assert_not_called()
+
+    def test_combined_token_hand_action_routes_separately(self, make_robot):
+        factory, mocks = make_robot
+        robot = factory(controller=TokenController())
+        hand = self.attach_hand(robot)
+        action = {"motion_token.0.pos": 0.4, **{f"left_hand.{key}": 0.5 for key in hand.action_features}}
+        assert robot.send_action(action) == action
+        assert robot.controller_input["motion_token.0.pos"] == 0.4
+        assert not any(key.startswith("left_hand.") for key in robot.controller_input)
+        hand.send_action.assert_called_once_with(dict.fromkeys(hand.action_features, 0.5))
+        mocks["publisher_mock"].Write.assert_not_called()
+
+    def test_feedback_and_disconnect(self, make_robot):
+        factory, mocks = make_robot
+        robot = factory()
+        robot._lowstate = mocks["lowstate_msg"]
+        hand = self.attach_hand(robot)
+        assert robot.get_observation()["left_hand.motor_0.pos"] == 0.2
+        assert robot.is_connected
+        hand.is_connected = False
+        assert not robot.is_connected
+        robot.disconnect()
+        hand.disconnect.assert_called_once()
+        assert robot._lowstate is None
+
+    def test_invalid_hand_action_prevents_body_dispatch(self, make_robot):
+        factory, mocks = make_robot
+        robot = factory()
+        hand = self.attach_hand(robot)
+        hand.prepare_action.side_effect = ValueError("Missing motor targets")
+        with pytest.raises(ValueError):
+            robot.send_action({"left_hand.motor_0.pos": 0.5, "kLeftShoulderPitch.q": 0.2})
+        mocks["publisher_mock"].Write.assert_not_called()
+        hand.send_action.assert_not_called()
+
+    def test_unconfigured_hand_rejected(self, make_robot):
+        factory, mocks = make_robot
+        robot = factory()
+        with pytest.raises(ValueError, match="No right hand"):
+            robot.send_action({"right_hand.index.pos": 0.5})
+        mocks["publisher_mock"].Write.assert_not_called()
+
+    def test_read_only_suppresses_hands(self, make_robot):
+        factory, mocks = make_robot
+        robot = factory(read_only=True)
+        hand = self.attach_hand(robot)
+        with pytest.raises(PermissionError):
+            robot.send_action({f"left_hand.{key}": 0.5 for key in hand.action_features})
+        hand.send_action.assert_not_called()
+        mocks["publisher_mock"].Write.assert_not_called()
+
+    def test_failed_hand_connect_rolls_back_other_hand(self, make_robot):
+        factory, mocks = make_robot
+        robot = factory()
+        left = self.attach_hand(robot, "left")
+        right = self.attach_hand(robot, "right")
+        left.is_connected = right.is_connected = False
+        right.connect.side_effect = TimeoutError("No hand feedback")
+        with pytest.raises(TimeoutError):
+            robot.connect()
+        left.disconnect.assert_called_once()
+        right.disconnect.assert_called_once()
+        mocks["publisher_mock"].Write.assert_not_called()
+
+    def test_child_configuration_inherits_parent_connection_and_read_only(self, make_robot):
+        import sys
+
+        from lerobot.robots.brainco_revo2 import BraincoRevo2HandConfig
+        from lerobot.robots.unitree_g1.unitree_g1 import UnitreeG1
+
+        # Keep the fixture's SDK patches active without opening either transport.
+        factory, _ = make_robot
+        factory()
+        config = UnitreeG1Config(
+            id="test_g1",
+            is_simulation=False,
+            robot_ip="192.0.2.10",
+            read_only=True,
+            left_hand=BraincoRevo2HandConfig(side="right"),
+            right_hand=BraincoRevo2HandConfig(),
+        )
+        with (
+            patch.dict(sys.modules, {"lerobot.robots.unitree_g1.unitree_sdk2_socket": MagicMock()}),
+            patch("lerobot.robots.unitree_g1.unitree_g1.BraincoRevo2Hand") as cls,
+        ):
+            robot = UnitreeG1(config)
+            children = [call.args[0] for call in cls.call_args_list]
+            assert [child.side for child in children] == ["left", "right"]
+            assert all(child.read_only and child.robot_ip == "192.0.2.10" for child in children)
+            assert [child.id for child in children] == ["test_g1_left_hand", "test_g1_right_hand"]
+            assert config.left_hand.side == "right"  # Parent doesn't mutate its input config.
+            robot.disconnect()
