@@ -1,4 +1,4 @@
-"""Raw PICO hand wrists for arm teleoperation; no finger or gripper commands."""
+"""Coherent PICO skeleton packets shared by arm and finger teleoperation."""
 
 import time
 from typing import Any
@@ -16,7 +16,7 @@ class PicoHandInput:
     """Own the native SDK and expose the same raw-pose interface as BiPico4.
 
     OpenXR joint 0 is the palm and joint 1 is the wrist. Poses are metres and
-    xyzw quaternions in the SDK's OpenXR world frame. Finger joints are ignored.
+    xyzw quaternions in the SDK's OpenXR world frame.
     """
 
     def __init__(self, timeout_s: float = 0.25):
@@ -53,6 +53,19 @@ class PicoHandInput:
             sdk.close()
 
     def get_xr_sample(self) -> tuple[int, dict[str, np.ndarray]]:
+        stamp, sample = self.get_hand_sample(require_head=True)
+        return stamp, {"head": sample["head"], **{side: sample[side][1].copy() for side in ("left", "right")}}
+
+    def get_hand_sample(
+        self, sides: tuple[str, ...] = ("left", "right"), *, require_head: bool = False
+    ) -> tuple[int, dict[str, np.ndarray]]:
+        """Read one validated snapshot; callers can share it between arms and fingers.
+
+        Only selected hands are required. Finger control does not depend on head
+        tracking. No native SDK ownership is added by downstream retargeting.
+        """
+        if not sides or len(set(sides)) != len(sides) or any(side not in ("left", "right") for side in sides):
+            raise ValueError("Select left, right, or both hands")
         if self._sdk is None:
             raise RuntimeError("PICO hand input is disconnected")
         sample = self._sdk.get_hand_input_sample()
@@ -72,16 +85,21 @@ class PicoHandInput:
         age = float(sample["age_s"])
         if not np.isfinite(age) or not 0 <= age <= self.timeout_s or now - self._advanced_at > self.timeout_s:
             raise HandTrackingUnavailableError("PICO hand packet is stale")
-        if not sample["head_valid"]:
+        if require_head and not sample["head_valid"]:
             raise HandTrackingUnavailableError("Headset tracking is missing from the hand packet")
-        poses = {"head": np.asarray(sample["head"], dtype=float)}
-        for side in ("left", "right"):
+        poses = {}
+        if require_head:
+            poses["head"] = np.asarray(sample["head"], dtype=float)
+        for side in sides:
             hand = sample[side]
             joints = np.asarray(hand["joints"], dtype=float)
             if not hand["active"] or joints.shape != (26, 7):
                 raise HandTrackingUnavailableError(f"{side} hand tracking is unavailable")
-            poses[side] = joints[1].copy()
-        for name, pose in poses.items():
+            if not np.isfinite(joints).all() or np.linalg.norm(joints[1, 3:]) < 1e-6:
+                raise HandTrackingUnavailableError(f"Invalid {side} hand skeleton")
+            poses[side] = joints.copy()
+        if require_head:
+            pose = poses["head"]
             if pose.shape != (7,) or not np.isfinite(pose).all() or np.linalg.norm(pose[3:]) < 1e-6:
-                raise HandTrackingUnavailableError(f"Invalid {name} wrist/head pose")
+                raise HandTrackingUnavailableError("Invalid head pose")
         return stamp, poses

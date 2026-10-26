@@ -479,5 +479,66 @@ not publish body commands. Connection waits for fresh feedback, stale feedback
 blocks reads and hand commands, and disconnect sends no hand gesture. G1 body
 reset does not reset the hands.
 
-XR skeleton retargeting and trigger-to-finger mappings belong in teleoperators or
-processors and are not included in this hardware adapter.
+### PICO hands-only teleoperation
+
+With the PICO hand-tracking SDK already installed, add the optional retargeting
+dependencies to your Python 3.12 environment:
+
+```bash
+uv pip install --python ../envs/unitree-g1/bin/python -e '.[pico_revo2]'
+```
+
+DexPilot uses `dex-retargeting==0.5.0` (Python 3.12; its package does not support
+Python 3.13). This version supports NumPy 2. The older fork pinned by
+`xr_teleoperate` requires incompatible NumPy/Torch versions. BrainCo kinematics,
+mimic joints, fingertip vector indices, smoothing (`alpha=0.2`), hardware ordering,
+and angle normalization follow upstream revision
+`817fb00c63cde15e5f24a0f8fa08e1e33ed89d3b`.
+
+Start with a read-only preview using the same bridge as the feedback example:
+
+```bash
+python examples/unitree_g1d/teleop_pico_hands.py \
+  --transport zmq --robot-ip 192.168.0.89 --side left
+```
+
+Reports include normalized `target_action`, measured `observation`, and
+`sent_action` (empty in preview). Use `--side right` or `--side both` as needed.
+Only selected hands must be tracked; headset pose is not required. The program
+does not connect to the body bridge or change the robot's motion mode.
+
+To execute, run the robot-side hand bridge **without** `--read-only`, then:
+
+```bash
+python examples/unitree_g1d/teleop_pico_hands.py \
+  --transport zmq --robot-ip 192.168.0.89 --side left --execute
+```
+
+In the interactive terminal, `r` then Enter starts/resumes after two seconds,
+`p` then Enter pauses, and `q` then Enter exits. No movement command is sent
+before start. Targets ramp from measured positions at `--max-speed` normalized
+units/second (default 1.0); `--motor-speed` controls the driver speed (default
+0.3). Verify each finger, especially the two thumb channels, on the installed
+hardware before using both hands together.
+
+If the thumb base moves in the opposite direction, add
+`--invert-thumb-base left` (or `right` / `both`). This applies `1 - target`
+only to `motor_0`, after retargeting and before command rate limiting.
+The thumb bend (`motor_1`) and other fingers keep their mapping. In preview,
+`target_action` includes this correction. Whole-system callers can pass
+`invert_thumb_base=("left",)` to `PicoRevo2Retargeter` for the same calibration.
+
+Tracking loss or an expired input/control deadline stops finger updates and
+requires explicit resume. Stale robot feedback or a transport/solver error ends
+the script. Pausing and disconnecting send no open/close gesture; the driver's
+last position target may remain active. `--duration` can bound preview or execution.
+
+For whole-system integration, `PicoHandInput.get_hand_sample()` exposes a coherent
+snapshot with all 26 OpenXR poses per hand. `PicoRevo2Retargeter.retarget()` accepts
+those skeletons and returns `left_hand.*.pos` / `right_hand.*.pos` actions, ready
+for `UnitreeG1.send_action()`. It owns neither the SDK nor a transport. A combined
+arm/finger loop should read one snapshot, use joint 1 for each arm wrist, and
+pass the same skeletons to the retargeter. The existing `get_xr_sample()` wrist
+interface remains available. The hands-only `PicoRevo2Session` owns start/pause
+and rate limiting; the caller owns connection cleanup. These objects are intended
+for a single control thread.

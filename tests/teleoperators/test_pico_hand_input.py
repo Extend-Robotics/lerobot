@@ -45,6 +45,22 @@ def test_selects_openxr_wrist_and_never_reads_controllers(source):
     assert source.sdk.method_calls == [("get_hand_input_sample", (), {})]
 
 
+def test_single_hand_skeleton_does_not_require_head_or_other_hand(source):
+    source.data["head_valid"] = False
+    source.data["right"]["active"] = False
+    stamp, skeletons = source.teleop.get_hand_sample(("left",))
+    assert stamp == 10 and set(skeletons) == {"left"}
+    assert skeletons["left"].shape == (26, 7)
+    skeletons["left"][:] = 0
+    assert source.teleop.get_hand_sample(("left",))[1]["left"][1, 6] == 1
+
+
+def test_invalid_finger_position_is_rejected(source):
+    source.data["left"]["joints"][10][0] = float("nan")
+    with pytest.raises(HandTrackingUnavailableError, match="skeleton"):
+        source.teleop.get_hand_sample(("left",))
+
+
 @pytest.mark.parametrize("side", ["left", "right"])
 def test_inactive_hand_invalidates_entire_sample(source, side):
     source.data[side]["active"] = False
