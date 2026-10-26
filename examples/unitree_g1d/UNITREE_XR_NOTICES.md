@@ -3,7 +3,7 @@
 Ported sources:
 
 - `xr_teleoperate` revision `817fb00c63cde15e5f24a0f8fa08e1e33ed89d3b`: `teleop/robot_control/robot_arm_ik.py`, `teleop/robot_control/robot_arm.py`, `teleop/utils/weighted_moving_filter.py`.
-- Its pinned `televuer` submodule revision `766de45e74373ae0ea66321d942ce538385655a5`: controller/head-yaw mapping in `src/televuer/tv_wrapper.py`.
+- Its pinned `televuer` submodule revision `766de45e74373ae0ea66321d942ce538385655a5`: controller/head-yaw mapping and left/right hand wrist frame corrections in `src/televuer/tv_wrapper.py`.
 
 Modified to use LeRobot's model loading, explicit joint-order conversion, native PICO SDK poses and the existing socket bridge. Preview, arm-only G1-D body handling and fault cleanup are adapters; upstream mapping/IK/control coefficients are preserved. Numerical parity was checked against the pinned upstream IK class, filter and gravity feedforward on an eight-target sequence.
 

@@ -1,4 +1,4 @@
-# PICO controllers to G1-D: Unitree XR mapping and IK
+# PICO controllers or hands to G1-D: Unitree XR mapping and IK
 
 The default launcher now uses the G1-29 controller mapping, IK objective, solver
 options, joint filter, gravity feedforward and arm gains from
@@ -30,7 +30,7 @@ Inspect the absolute targets before enabling physical movement:
 bash scripts/pico4/teleop_g1d.sh --robot-ip <ROBOT_IP> --execute
 ```
 
-Execution waits for `r` followed by Enter. `q` followed by Enter or Ctrl+C exits.
+Execution waits for `r` followed by Enter, then a two-second delay. `q` followed by Enter or Ctrl+C exits.
 Use an interactive terminal for execution. **Starting moves both arms toward the
 absolute tracked poses. Grips no longer clutch or rebase an arm.** Triggers and
 A/B/X/Y do not control the arms. Looking around changes the head-yaw reference,
@@ -40,6 +40,54 @@ The launcher uses `../envs/unitree-g1/bin/python`. Override with
 `PICO_G1_PYTHON=/path/to/python` for another environment containing LeRobot,
 Unitree SDK, Pinocchio with CasADi, and the PICO SDK. Install the PICO binding with
 `PICO_PYTHON=/path/to/python bash scripts/pico4/install_sdk.sh` if needed.
+
+## Bare hands controlling arms
+
+Enable hand tracking and headset tracking in the PICO headset app, and enable
+sending data. Controllers are not needed. Only the tracked wrist poses are used;
+finger motion, pinch and grasp gestures send no robot hand or gripper commands.
+The headset client must send OpenXR-order 26-joint hand arrays in the same world
+frame as its headset pose (palm index 0, wrist index 1; metres, xyzw quaternions).
+
+Rebuild the native Python binding once to expose coherent hand packets:
+
+```bash
+PICO_PYTHON=../envs/unitree-g1/bin/python bash scripts/pico4/install_sdk.sh
+```
+
+Preview, then enable movement after checking alignment:
+
+```bash
+bash scripts/pico4/teleop_g1d.sh --robot-ip <ROBOT_IP> --input hands
+bash scripts/pico4/teleop_g1d.sh --robot-ip <ROBOT_IP> --input hands --execute
+```
+
+Execution requires `r` then Enter, followed by a two-second delay to return your
+hands to the tracking area. Both hands must be visible and valid when the delay
+ends. `p` then Enter pauses both arms and cancels a pending start; `r` resumes
+after the same two-second delay; `q` exits. Repeating `r` restarts the countdown. Preview tries to start immediately;
+if tracking is not ready, press `r` once both hands are visible. Tracking recovery
+never resumes movement automatically. Hand mode does not wait for controller
+poses or read controller buttons. The default remains `--input controllers`.
+
+The existing absolute head-yaw-relative mapping and arm IK are retained, with
+televuer's left/right OpenXR hand wrist frame corrections. Preview prints the
+mapped wrist target matrices and IK residuals. Verify the left/right sides,
+translations and wrist rotations with the installed headset app before execution;
+physical wrist alignment and tracking quality have not been hardware validated.
+Hand mode uses the same speed clipping as controllers: the upstream 30 rad/s
+parameter with a fixed 4 ms period, clipping targets against measured joints.
+There is no extra hand-mode speed limit, including at start and resume. Preview
+bypasses clipping, as in controller mode. Feedforward uses measured arm joints.
+
+Missing/inactive hands, invalid wrist/head poses, old received packets or stalled
+source timestamps pause both arms. Head and both hands must be present in the
+same packet; cached skeletons cannot be kept alive by headset-only updates.
+Tracking is checked again after IK. During a pause the publisher holds the last
+command with gravity support while robot feedback and communication are healthy.
+**After five seconds paused, the process exits and existing cleanup makes the
+arms and waist passive.** Support the robot accordingly. Feedback, IK or transport
+faults still stop execution immediately. This adds no robot-side network watchdog.
 
 ## Upstream behavior
 

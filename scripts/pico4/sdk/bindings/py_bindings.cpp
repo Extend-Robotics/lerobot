@@ -6,6 +6,8 @@
 #include <mutex>
 #include <sstream>
 #include <array>
+#include <chrono>
+#include <cmath>
 #include <nlohmann/json.hpp>
 #include "PXREARobotSDK.h"
 
@@ -87,6 +89,84 @@ std::array<double, 6> stringToVelocityArray(const std::string& velocityStr) {
     return result;
 }
 
+std::array<double, 7> handPoseFromString(const std::string& text) {
+    std::array<double, 7> pose{};
+    std::stringstream stream(text);
+    std::string component;
+    int count = 0;
+    while (std::getline(stream, component, ',')) {
+        if (count >= 7) throw std::invalid_argument("Hand pose has too many components");
+        size_t parsed = 0;
+        const double number = std::stod(component, &parsed);
+        if (!std::isfinite(number) || component.find_first_not_of(" \t\r\n", parsed) != std::string::npos) {
+            throw std::invalid_argument("Invalid hand pose component");
+        }
+        pose[count++] = number;
+    }
+    if (count != 7 || (!text.empty() && text.back() == ',')) {
+        throw std::invalid_argument("Hand pose requires seven components");
+    }
+    return pose;
+}
+
+// A complete packet snapshot, separate from the legacy cached controller getters.
+// Missing/malformed hand or head fields must never reuse an older valid pose.
+struct HandInputSample {
+    std::array<double, 7> head{};
+    std::array<std::array<std::array<double, 7>, 26>, 2> joints{};
+    std::array<bool, 2> active{false, false};
+    int64_t stamp = 0;
+    bool headValid = false;
+    std::chrono::steady_clock::time_point received{};
+};
+HandInputSample HandInput;
+std::mutex handInputMutex;
+
+void updateHandInput(const json& value) {
+    std::lock_guard<std::mutex> lock(handInputMutex);
+    HandInput = HandInputSample{};  // Invalidate even if parsing throws below.
+    HandInputSample next;
+    next.received = std::chrono::steady_clock::now();
+    next.stamp = value.value("timeStampNs", int64_t{0});
+    if (value.contains("Head") && value["Head"].contains("pose")) {
+        next.head = handPoseFromString(value["Head"]["pose"].get<std::string>());
+        next.headValid = true;
+    }
+    const std::array<std::string, 2> names{"leftHand", "rightHand"};
+    if (value.contains("Hand") && value["Hand"].is_object()) {
+        for (int side = 0; side < 2; ++side) {
+            if (!value["Hand"].contains(names[side])) continue;
+            const auto& hand = value["Hand"][names[side]];
+            if (!hand.value("isActive", 0) || !hand.contains("HandJointLocations")) continue;
+            const auto& joints = hand["HandJointLocations"];
+            if (!joints.is_array() || joints.size() != 26) continue;
+            for (int i = 0; i < 26; ++i) {
+                next.joints[side][i] = handPoseFromString(joints[i].at("p").get<std::string>());
+            }
+            next.active[side] = true;
+        }
+    }
+    HandInput = next;
+}
+
+pybind11::dict getHandInputSample() {
+    std::lock_guard<std::mutex> lock(handInputMutex);
+    pybind11::dict result;
+    result["head"] = HandInput.head;
+    result["head_valid"] = HandInput.headValid;
+    result["stamp"] = HandInput.stamp;
+    result["age_s"] = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - HandInput.received).count();
+    const std::array<std::string, 2> names{"left", "right"};
+    for (int side = 0; side < 2; ++side) {
+        pybind11::dict hand;
+        hand["active"] = HandInput.active[side];
+        hand["joints"] = HandInput.joints[side];
+        result[pybind11::str(names[side])] = hand;
+    }
+    return result;
+}
+
 void OnPXREAClientCallback(void* context, PXREAClientCallbackType type, int status, void* userData)
 {
     switch (type)
@@ -95,12 +175,20 @@ void OnPXREAClientCallback(void* context, PXREAClientCallbackType type, int stat
         std::cout << "server connect\n" << std::endl;
         break;
     case PXREAServerDisconnect:
+        {
+            std::lock_guard<std::mutex> lock(handInputMutex);
+            HandInput = HandInputSample{};
+        }
         std::cout << "server disconnect\n" << std::endl;
         break;
     case PXREADeviceFind:
         std::cout << "device found\n" << (const char*)userData << std::endl;
         break;
     case PXREADeviceMissing:
+        {
+            std::lock_guard<std::mutex> lock(handInputMutex);
+            HandInput = HandInputSample{};
+        }
         std::cout << "device missing\n" << (const char*)userData << std::endl;
         break;
     case PXREADeviceConnect:
@@ -112,6 +200,7 @@ void OnPXREAClientCallback(void* context, PXREAClientCallbackType type, int stat
             json data = json::parse(dsj.stateJson);
             if (data.contains("value")) {
                 auto value = json::parse(data["value"].get<std::string>());
+                updateHandInput(value);
                 if (value["Controller"].contains("left")) {
                     auto& left = value["Controller"]["left"];
                     {
@@ -257,7 +346,11 @@ void OnPXREAClientCallback(void* context, PXREAClientCallbackType type, int stat
                     }
                 }
             }
-        } catch (const json::exception& e) {
+        } catch (const std::exception& e) {
+            {
+                std::lock_guard<std::mutex> lock(handInputMutex);
+                HandInput = HandInputSample{};
+            }
             std::cerr << "JSON parsing error: " << e.what() << std::endl;
         }
             break;
@@ -265,6 +358,10 @@ void OnPXREAClientCallback(void* context, PXREAClientCallbackType type, int stat
 }
 
 void init() {
+    {
+        std::lock_guard<std::mutex> lock(handInputMutex);
+        HandInput = HandInputSample{};
+    }
     if (PXREAInit(NULL, OnPXREAClientCallback, PXREAFullMask) != 0) {
         throw std::runtime_error("PXREAInit failed");
     }
@@ -494,6 +591,7 @@ PYBIND11_MODULE(xensevr_pc_service_sdk, m) {
     m.def("get_Y_button", &getLeftSecondaryButton, "Get the left secondary button state.");
     m.def("get_B_button", &getRightSecondaryButton, "Get the right secondary button state.");
     m.def("get_time_stamp_ns", &getTimeStampNs, "Get the timestamp in nanoseconds.");
+    m.def("get_hand_input_sample", &getHandInputSample, "Get a coherent head/hand packet with validity and receive age.");
     m.def("get_left_hand_tracking_state", &getLeftHandTrackingState, "Get the left hand state.");
     m.def("get_right_hand_tracking_state", &getRightHandTrackingState, "Get the right hand state.");
     m.def("get_left_hand_is_active", &getLeftHandIsActive, "Get the left hand tracking quality (0 = low, 1 = high).");
