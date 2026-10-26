@@ -1,6 +1,8 @@
 """Hand contracts, DDS driver messages, stale-state behavior and transport lifecycle."""
 
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -144,6 +146,56 @@ def test_dds_topics_motor_order_and_read_only(read_only):
         transport.close()
         sub.return_value.Close.assert_called_once()
         assert transport.read() is None
+
+
+@pytest.mark.parametrize("read_only", [True, False])
+def test_concurrent_dds_connections_serialize_channel_setup(read_only):
+    module = "lerobot.robots.brainco_revo2.transport"
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    second_entered = threading.Event()
+    hands = [
+        DdsHandTransport(BraincoRevo2HandConfig(side=side, transport="dds", read_only=read_only))
+        for side in ("left", "right")
+    ]
+
+    def subscriber(topic, message_type):
+        if topic == "rt/brainco/left/state":
+            first_entered.set()
+            assert release_first.wait(2)
+        else:
+            second_entered.set()
+        return MagicMock()
+
+    def connect_second():
+        second_started.set()
+        hands[1].connect()
+
+    with (
+        patch(f"{module}.initialize_dds"),
+        patch(f"{module}.ChannelSubscriber", side_effect=subscriber, create=True),
+        patch(f"{module}.ChannelPublisher", create=True) as publisher,
+        patch(f"{module}.MotorStates_", create=True),
+        patch(f"{module}.MotorCmds_", create=True),
+        ThreadPoolExecutor(max_workers=2) as pool,
+    ):
+        first = pool.submit(hands[0].connect)
+        try:
+            assert first_entered.wait(2)
+            second = pool.submit(connect_second)
+            assert second_started.wait(2)
+            # Model the interval where CycloneDDS has marked a shared type as
+            # populated but has not finished building its serialization metadata.
+            assert not second_entered.wait(0.1)
+        finally:
+            release_first.set()
+        first.result(timeout=2)
+        second.result(timeout=2)
+        assert second_entered.is_set()
+        assert publisher.call_count == (0 if read_only else 2)
+        for hand in hands:
+            hand.close()
 
 
 def test_zmq_read_only_lifecycle_and_age():

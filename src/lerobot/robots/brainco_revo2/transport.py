@@ -18,9 +18,13 @@ if TYPE_CHECKING or _unitree_sdk_available:
     from unitree_sdk2py.idl.unitree_go.msg.dds_ import MotorCmds_, MotorStates_
 
 
+_DDS_SETUP_LOCK = threading.RLock()
+
+
 def initialize_dds(config: BraincoRevo2HandConfig) -> None:
     require_package("unitree-sdk2py", extra="unitree_g1", import_name="unitree_sdk2py")
-    ChannelFactoryInitialize(config.domain_id, config.network_interface)
+    with _DDS_SETUP_LOCK:
+        ChannelFactoryInitialize(config.domain_id, config.network_interface)
 
 
 def positions(values: list[float]) -> list[float]:
@@ -39,15 +43,18 @@ class DdsHandTransport:
         self.publisher: Any = None
 
     def connect(self) -> None:
-        # SDK initialization is process-global and idempotent. All DDS devices in a
-        # process must use the same domain/interface; initialize it before connecting.
-        initialize_dds(self.config)
-        topic = f"rt/brainco/{self.config.side}"
-        self.subscriber = ChannelSubscriber(f"{topic}/state", MotorStates_)
-        self.subscriber.Init(self._receive, 1)
-        if not self.config.read_only:
-            self.publisher = ChannelPublisher(f"{topic}/cmd", MotorCmds_)
-            self.publisher.Init()
+        # CycloneDDS lazily builds shared IDL/XTypes metadata during channel creation.
+        # Serialize setup across hands so neither sees partially populated types.
+        with _DDS_SETUP_LOCK:
+            # SDK initialization is process-global and idempotent. All DDS devices in a
+            # process must use the same domain/interface; initialize it before connecting.
+            initialize_dds(self.config)
+            topic = f"rt/brainco/{self.config.side}"
+            self.subscriber = ChannelSubscriber(f"{topic}/state", MotorStates_)
+            self.subscriber.Init(self._receive, 1)
+            if not self.config.read_only:
+                self.publisher = ChannelPublisher(f"{topic}/cmd", MotorCmds_)
+                self.publisher.Init()
 
     def _receive(self, msg: Any) -> None:
         try:
