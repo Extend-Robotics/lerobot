@@ -537,6 +537,48 @@ class TestSendAction:
 
 
 class TestCartesianControl:
+    def test_readonly_has_no_publisher_or_shutdown_write(self, make_robot):
+        factory, mocks = make_robot
+        robot = factory(read_only=True)
+        # Retain the mocked channels, without launching a simulation environment.
+        robot.config.is_simulation = False
+        robot.connect()
+        mocks["publisher_mock"].Init.assert_not_called()
+        with pytest.raises(PermissionError):
+            robot.publish_lowcmd({"kLeftElbow.q": 0.1})
+        robot._send_zero_torque()
+        robot.disconnect()
+        mocks["publisher_mock"].Write.assert_not_called()
+
+    def test_prepared_arm_publication_checks_age_and_excludes_body(self, make_robot):
+        factory, mocks = make_robot
+        robot = arm_for_publish(factory(arm_commands_only=True), mocks)
+        action = {f"{joint.name}.q": 0.1 for joint in G1_29_JointArmIndex}
+        robot._lowstate_received_at = time.monotonic() - 1
+        mocks["publisher_mock"].Write.reset_mock()
+        with pytest.raises(TimeoutError):
+            robot.send_arm_joint_action(action, 0.25)
+        mocks["publisher_mock"].Write.assert_not_called()
+        # The Pico MVP opts out explicitly; default callers still reject old state.
+        robot.send_arm_joint_action(action, 0.25, check_state_age=False)
+        mocks["publisher_mock"].Write.assert_called_once()
+        mocks["publisher_mock"].Write.reset_mock()
+        robot._lowstate_received_at = time.monotonic()
+        robot.send_arm_joint_action(action, 0.25)
+        mocks["publisher_mock"].Write.assert_called_once()
+        for motor in robot.msg.motor_cmd[:12]:
+            assert motor.kp == motor.kd == motor.tau == motor.qd == 0
+        for index in range(12, 15):
+            assert robot.msg.motor_cmd[index].kp == robot.kp[index]
+            assert robot.msg.motor_cmd[index].kd == robot.kd[index]
+        waist_q = robot.msg.motor_cmd[12].q
+        robot.publish_lowcmd({"kWaistYaw.q": 2.0})
+        assert robot.msg.motor_cmd[12].q == waist_q
+        robot.publish_lowcmd(action, passivate_body=True)
+        assert all(motor.kp == motor.kd == 0 for motor in robot.msg.motor_cmd[:15])
+        with pytest.raises(ValueError):
+            robot.send_arm_joint_action({**action, "kWaistYaw.q": 1.0}, 0.25)
+
     @pytest.mark.parametrize("control_space", ["cartesian_abs", "cartesian_rel"])
     def test_features_and_observation(self, make_robot, control_space):
         from lerobot.robots.unitree_g1.unitree_g1 import G1_29_LowState

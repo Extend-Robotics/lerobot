@@ -38,6 +38,7 @@ from .g1_utils import (
     REMOTE_AXES,
     G1_29_JointArmIndex,
     G1_29_JointIndex,
+    action_to_pose,
     default_remote_input,
 )
 
@@ -185,6 +186,7 @@ class UnitreeG1(Robot):
         self.sim_env = None
         self._env_wrapper: dict[str, dict[int, gym.vector.VectorEnv]] | None = None
         self._lowstate = None
+        self._lowstate_received_at: float | None = None
         self._lowstate_lock = threading.Lock()
         # Guards the shared lowcmd message: the controller thread, send_action(), reset() and
         # the shutdown path all publish through it, and a torn update still carries a valid CRC.
@@ -242,6 +244,7 @@ class UnitreeG1(Robot):
 
                 with self._lowstate_lock:
                     self._lowstate = lowstate
+                    self._lowstate_received_at = time.monotonic()
 
             current_time = time.time()
             all_t_elapsed = current_time - start_time
@@ -254,9 +257,24 @@ class UnitreeG1(Robot):
         kp: np.ndarray | list[float] | None = None,
         kd: np.ndarray | list[float] | None = None,
         tau: np.ndarray | list[float] | None = None,
+        *,
+        passivate_body: bool = False,
     ) -> None:  # writes robot command whenever requested
+        if self.config.read_only:
+            raise PermissionError("Robot command publishing is disabled in read-only mode")
         with self._lowcmd_lock:
             for motor in G1_29_JointIndex:
+                if self.config.arm_commands_only and motor.value < 15:
+                    cmd = self.msg.motor_cmd[motor.value]
+                    # Retain configured waist support at its connect-time target,
+                    # while rejecting body targets from the teleoperation caller.
+                    hold_waist = motor.value >= 12 and not passivate_body
+                    cmd.kp = self.kp[motor.value] if hold_waist else 0.0
+                    cmd.kd = self.kd[motor.value] if hold_waist else 0.0
+                    cmd.tau = cmd.qd = 0.0
+                    if not np.isfinite(cmd.q):
+                        cmd.q = 0.0
+                    continue
                 key = f"{motor.name}.q"
                 if key in action:
                     self.msg.motor_cmd[motor.value].q = action[key]
@@ -386,8 +404,9 @@ class UnitreeG1(Robot):
             self._ChannelFactoryInitialize(0, config=self.config)
 
         # Initialize direct motor control interface
-        self.lowcmd_publisher = self._ChannelPublisher(kTopicLowCommand_Debug, hg_LowCmd)
-        self.lowcmd_publisher.Init()
+        if not self.config.read_only:
+            self.lowcmd_publisher = self._ChannelPublisher(kTopicLowCommand_Debug, hg_LowCmd)
+            self.lowcmd_publisher.Init()
         self.lowstate_subscriber = self._ChannelSubscriber(kTopicLowState, hg_LowState)
         self.lowstate_subscriber.Init()
 
@@ -450,14 +469,23 @@ class UnitreeG1(Robot):
 
     def _send_zero_torque(self) -> None:
         """Send a zero-gain command to make joints passive before shutting down."""
+        if self.config.read_only:
+            return
         try:
             with self._lowstate_lock:
                 lowstate = self._lowstate
             if lowstate is None:
                 return
-            action = {f"{motor.name}.q": lowstate.motor_state[motor.value].q for motor in G1_29_JointIndex}
+            action = {
+                f"{motor.name}.q": (
+                    float(lowstate.motor_state[motor.value].q)
+                    if np.isfinite(lowstate.motor_state[motor.value].q)
+                    else 0.0
+                )
+                for motor in G1_29_JointIndex
+            }
             zero_gains = np.zeros(29, dtype=np.float32)
-            self.publish_lowcmd(action, kp=zero_gains, kd=zero_gains, tau=zero_gains)
+            self.publish_lowcmd(action, kp=zero_gains, kd=zero_gains, tau=zero_gains, passivate_body=True)
             logger.info("Sent zero-torque command for safe shutdown")
         except Exception as e:
             logger.warning(f"Failed to send zero-torque on disconnect: {e}")
@@ -578,6 +606,27 @@ class UnitreeG1(Robot):
 
         return obs
 
+    def state_age_s(self) -> float:
+        """Return monotonic age of the last received robot state, or infinity."""
+        with self._lowstate_lock:
+            received_at = self._lowstate_received_at
+        return float("inf") if received_at is None else time.monotonic() - received_at
+
+    def send_arm_joint_action(
+        self, action: dict[str, float], max_state_age_s: float, *, check_state_age: bool = True
+    ) -> None:
+        """Publish checked IK results; Pico MVP may explicitly opt out of feedback age checks."""
+        if not np.isfinite(max_state_age_s) or max_state_age_s <= 0:
+            raise ValueError("State age limit must be finite and positive")
+        keys = {f"{joint.name}.q" for joint in G1_29_JointArmIndex}
+        if set(action) != keys or not all(np.isfinite(value) for value in action.values()):
+            raise ValueError("Expected exactly 14 finite arm joint targets")
+        if self.controller is not None or not self.config.arm_commands_only:
+            raise ValueError("Prepared arm commands require arm-only mode without a controller")
+        if check_state_age and self.state_age_s() > max_state_age_s:
+            raise TimeoutError("Robot feedback is stale")
+        self.publish_lowcmd(action)
+
     def send_action(self, action: RobotAction) -> RobotAction:
         if self.control_space != "joint":
             with self._control_lock:
@@ -628,21 +677,15 @@ class UnitreeG1(Robot):
         p_target = p_current + dp, R_target = dR @ R_current.
         Identity rotation is encoded as r1-r6 = [1, 0, 0, 0, 1, 0].
         """
+        if self.arm_ik is None:
+            raise RuntimeError("Cartesian control requires arm IK")
         with self._lowstate_lock:
-            arm_q = np.array([self._lowstate.motor_state[joint].q for joint in G1_29_JointArmIndex])
+            lowstate = self._lowstate
+            if lowstate is None:
+                raise RuntimeError("No robot feedback available")
+            arm_q = np.array([lowstate.motor_state[joint].q for joint in G1_29_JointArmIndex])
 
-        targets = []
-        for side in ("left", "right"):
-            prefix = f"{side}_tcp"
-            first = np.array([action[f"{prefix}.r{i}"] for i in (1, 2, 3)])
-            second = np.array([action[f"{prefix}.r{i}"] for i in (4, 5, 6)])
-            first = first / np.linalg.norm(first)
-            second = second - np.dot(first, second) * first
-            second = second / np.linalg.norm(second)
-            target = np.eye(4)
-            target[:3, :3] = np.column_stack((first, second, np.cross(first, second)))
-            target[:3, 3] = [action[f"{prefix}.{axis}"] for axis in ("x", "y", "z")]
-            targets.append(target)
+        targets = [action_to_pose(action, side) for side in ("left", "right")]
 
         if self.control_space == "cartesian_rel":
             current_poses = self.arm_ik.forward_kinematics(arm_q)

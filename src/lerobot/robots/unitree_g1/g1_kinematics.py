@@ -201,7 +201,8 @@ class G1_29_ArmIK:  # noqa: N801
         self.rotation_cost = casadi.sumsqr(
             self.rotational_error(self.var_q, self.param_tf_l, self.param_tf_r)
         )
-        self.regularization_cost = casadi.sumsqr(self.var_q)
+        # Redundant arm joints should stay near the measured pose, not drift
+        # toward zero even when the requested wrists have not moved.
         self.smooth_cost = casadi.sumsqr(self.var_q - self.var_q_last)
 
         # Setting optimization constraints and goals
@@ -212,12 +213,7 @@ class G1_29_ArmIK:  # noqa: N801
                 self.reduced_robot.model.upperPositionLimit,
             )
         )
-        self.opti.minimize(
-            50 * self.translational_cost
-            + self.rotation_cost
-            + 0.02 * self.regularization_cost
-            + 0.1 * self.smooth_cost
-        )
+        self.opti.minimize(50 * self.translational_cost + self.rotation_cost + 0.1 * self.smooth_cost)
 
         opts = {
             "ipopt": {"print_level": 0, "max_iter": 50, "tol": 1e-6},
@@ -228,6 +224,7 @@ class G1_29_ArmIK:  # noqa: N801
 
         self.init_data = np.zeros(self.reduced_robot.model.nq)
         self.smooth_filter = WeightedMovingFilter(np.array([0.4, 0.3, 0.2, 0.1]), 14)
+        self.last_solve_success = False
 
     def forward_kinematics(self, arm_q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Return left/right end-effector transforms in the reduced model's base frame.
@@ -239,8 +236,17 @@ class G1_29_ArmIK:  # noqa: N801
         self._pin.framesForwardKinematics(self.reduced_robot.model, data, q_pin)
         return data.oMf[self.L_hand_id].homogeneous.copy(), data.oMf[self.R_hand_id].homogeneous.copy()
 
-    def solve_ik(self, left_wrist, right_wrist, current_lr_arm_motor_q=None, current_lr_arm_motor_dq=None):
-        """Solve for arm positions and feedforward torques, both in G1 motor order."""
+    def solve_ik(
+        self,
+        left_wrist,
+        right_wrist,
+        current_lr_arm_motor_q=None,
+        current_lr_arm_motor_dq=None,
+        *,
+        smooth: bool = True,
+    ):
+        """Solve in G1 motor order; disable smoothing when the caller limits joint speed."""
+        self.last_solve_success = False
         if current_lr_arm_motor_q is not None:
             self.init_data = np.asarray(current_lr_arm_motor_q)[self._arm_reorder_g1_to_pin]
         self.opti.set_initial(self.var_q, self.init_data)
@@ -249,24 +255,23 @@ class G1_29_ArmIK:  # noqa: N801
         self.opti.set_value(self.param_tf_r, right_wrist)
         self.opti.set_value(self.var_q_last, self.init_data)  # for smooth
 
-        converged = True
         try:
             self.opti.solve()
-            sol_q = self.opti.value(self.var_q)
+            sol_q = np.asarray(self.opti.value(self.var_q), dtype=float)
+            if sol_q.shape != (14,) or not np.isfinite(sol_q).all():
+                raise ValueError("Nonfinite or malformed IK solution")
         except Exception as e:
-            converged = False
             logger.error(f"IK convergence error: {e}")
-            sol_q = self.opti.debug.value(self.var_q)
-
-        self.smooth_filter.add_data(sol_q)
-        sol_q = self.smooth_filter.filtered_data
-        self.init_data = sol_q
-
-        if not converged:
-            logger.error(
-                f"sol_q:{sol_q} \nmotorstate: \n{current_lr_arm_motor_q} \nleft_pose: \n{left_wrist} \nright_pose: \n{right_wrist}"
+            # Failed iterates must not enter the moving filter or warm-start history.
+            return (
+                self.init_data[self._arm_reorder_pin_to_g1].copy(),
+                np.zeros(self.reduced_robot.model.nv),
             )
-            return current_lr_arm_motor_q, np.zeros(self.reduced_robot.model.nv)
+
+        if smooth:
+            self.smooth_filter.add_data(sol_q)
+            sol_q = self.smooth_filter.filtered_data
+        self.init_data = sol_q
 
         sol_tauff = self._pin.rnea(
             self.reduced_robot.model,
@@ -276,6 +281,7 @@ class G1_29_ArmIK:  # noqa: N801
             np.zeros(self.reduced_robot.model.nv),
         )
 
+        self.last_solve_success = True
         return sol_q[self._arm_reorder_pin_to_g1], sol_tauff[self._arm_reorder_pin_to_g1]
 
     def solve_tau(self, current_lr_arm_motor_q=None, current_lr_arm_motor_dq=None):

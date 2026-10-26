@@ -1,10 +1,13 @@
 """PICO mapping and lifecycle tests; no headset or native SDK required."""
 
+from itertools import chain, repeat
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 
+from lerobot.robots.unitree_g1.pico_teleop import ARM_KEYS, PicoArmSession
 from lerobot.teleoperators.bi_pico4 import BiPico4, BiPico4Config, bi_pico4 as bi_module
 from lerobot.teleoperators.pico4 import Pico4, Pico4Config, teleop_pico4 as single_module
 from lerobot.teleoperators.utils import make_teleoperator_from_config
@@ -81,3 +84,134 @@ def test_clutch_mapping_and_independent_arms(sdk):
         np.testing.assert_allclose(cols @ cols.T, np.eye(2), atol=1e-6)
     finally:
         teleop.disconnect()
+
+
+def test_control_status_uses_stream_timestamp_and_validates_raw_pose(sdk):
+    sdk.get_time_stamp_ns.return_value = 1234
+    teleop = BiPico4(BiPico4Config())
+    try:
+        teleop.connect()
+        stamp, grips = teleop.get_control_status()
+        assert stamp == 1234 and grips == {"left": 0.0, "right": 0.0}
+        sdk.get_left_controller_pose.return_value = [0.0] * 7
+        with pytest.raises(ValueError):
+            teleop.get_control_status()
+    finally:
+        teleop.disconnect()
+
+
+def test_rebase_one_arm_preserves_other_target(sdk):
+    teleop = BiPico4(BiPico4Config())
+    try:
+        teleop.connect()
+        teleop.reset_arm_to_pose("left", np.array([0.3, 0.2, 0.5, 1, 0, 0, 0]))
+        action = teleop.get_action()
+        assert action["left_tcp.x"] == pytest.approx(0.3)
+        assert action["right_tcp.x"] == 0.0
+    finally:
+        teleop.disconnect()
+
+
+def test_cached_grip_states_use_pico_hysteresis(sdk):
+    teleop = BiPico4(BiPico4Config())
+    try:
+        teleop.connect()
+        sdk.get_left_grip.return_value = 1.0
+        teleop.get_action()
+        assert teleop.get_arm_enabled() == {"left": True, "right": False}
+        middle = (teleop.config.grip_enable_threshold + teleop.config.grip_disable_threshold) / 2
+        sdk.get_left_grip.return_value = middle
+        teleop.get_action()
+        assert teleop.get_arm_enabled()["left"]
+        sdk.get_left_grip.return_value = 0.0
+        teleop.get_action()
+        assert not teleop.get_arm_enabled()["left"]
+        sdk.get_left_grip.return_value = middle
+        teleop.get_action()
+        assert not teleop.get_arm_enabled()["left"]
+    finally:
+        teleop.disconnect()
+
+
+def test_g1_session_uses_real_pico_clutch_and_rebases_limited_commands(sdk):
+    now = [1.0]
+    robot = MagicMock()
+    robot.config = SimpleNamespace(read_only=False, arm_commands_only=True, gravity_compensation=False)
+    robot.control_space, robot.controller = "cartesian_abs", None
+    robot.state_age_s.return_value = 0.0
+    robot.get_observation.return_value = dict.fromkeys(ARM_KEYS, 0.0)
+    solver = robot.arm_ik
+
+    def fk(q):
+        poses = [np.eye(4), np.eye(4)]
+        poses[0][0, 3], poses[1][0, 3] = q[0], q[7]
+        return tuple(poses)
+
+    def solve(left, right, q, **kwargs):
+        q = q.copy()
+        q[0], q[7] = left[0, 3], right[0, 3]
+        return q, np.zeros(14)
+
+    solver.forward_kinematics.side_effect = fk
+    solver.solve_ik.side_effect = solve
+    solver.last_solve_success = True
+    solver._arm_reorder_pin_to_g1 = np.arange(14)
+    solver.reduced_robot.model = SimpleNamespace(
+        lowerPositionLimit=np.full(14, -1.0), upperPositionLimit=np.full(14, 1.0)
+    )
+    teleop = BiPico4(
+        BiPico4Config(pos_sensitivity=1.0, filter_window_size=1, max_pos_velocity=0.0, max_rot_velocity=0.0)
+    )
+    session = PicoArmSession(robot, teleop, clock=lambda: now[0])
+
+    def tick():
+        now[0] += 1 / 30
+        sdk.get_time_stamp_ns.return_value = int(now[0] * 1e9)
+        return session.tick()
+
+    try:
+        session.initialize()
+        assert tick()["status"] == "waiting"
+        assert tick()["status"] == "ready"
+        sdk.get_left_grip.return_value = 1.0
+        tick()
+        sdk.get_left_controller_pose.return_value = [0, 0, -0.02, 0, 0, 0, 1]
+        moving = tick()
+        assert moving["joint_action"][ARM_KEYS[0]] == pytest.approx(0.01)
+        assert moving["joint_action"][ARM_KEYS[7]] == 0.0
+        sdk.get_left_grip.return_value = 0.0
+        assert tick()["joint_action"] == pytest.approx(moving["joint_action"])
+        sdk.get_left_grip.return_value = 1.0
+        assert tick()["joint_action"] == pytest.approx(moving["joint_action"])
+        sdk.get_left_controller_pose.return_value = [0, 0, -0.025, 0, 0, 0, 1]
+        assert tick()["joint_action"][ARM_KEYS[0]] == pytest.approx(0.015)
+    finally:
+        teleop.disconnect()
+
+
+@pytest.mark.parametrize("pre_init", [False, True])
+def test_delayed_controller_stream_can_start_after_eight_seconds(sdk, pre_init):
+    valid = [0, 0, 0, 0, 0, 0, 1]
+    sdk.get_left_controller_pose.side_effect = chain(repeat([0.0] * 7, 80), repeat(valid))
+    sdk.get_right_controller_pose.side_effect = chain(repeat([0.0] * 7, 80), repeat(valid))
+    teleop = BiPico4(BiPico4Config())
+    try:
+        if pre_init:
+            teleop.pre_init()
+        teleop.connect()
+        assert teleop.is_connected
+        assert sdk.get_left_controller_pose.call_count >= 81
+    finally:
+        if teleop.is_connected:
+            teleop.disconnect()
+    sdk.init.assert_called_once()
+    sdk.close.assert_called_once()
+
+
+def test_startup_timeout_identifies_missing_controller(sdk):
+    sdk.get_right_controller_pose.return_value = [0.0] * 7
+    teleop = BiPico4(BiPico4Config())
+    with pytest.raises(DeviceNotConnectedError, match="left=ready, right=missing"):
+        teleop.connect()
+    assert not teleop.is_connected
+    sdk.close.assert_called_once()

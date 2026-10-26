@@ -51,6 +51,9 @@ _DEFAULT_KP, _DEFAULT_KD = _build_gains()
 class UnitreeG1Config(RobotConfig):
     # Cartesian modes control only the arms, using left_tcp/right_tcp.{x,y,z,r1-r6}.
     control_space: Literal["joint", "cartesian_abs", "cartesian_rel"] = "joint"
+    # Read-only suppresses all command writes. Arm-only freezes waist targets and disables legs.
+    read_only: bool = False
+    arm_commands_only: bool = False
 
     kp: list[float] = field(default_factory=lambda: _DEFAULT_KP.copy())
     kd: list[float] = field(default_factory=lambda: _DEFAULT_KD.copy())
@@ -92,6 +95,8 @@ class UnitreeG1Config(RobotConfig):
 
     def __post_init__(self):
         super().__post_init__()
+        if (self.read_only or self.arm_commands_only) and self.controller is not None:
+            raise ValueError("Read-only/arm-only operation cannot run a whole-body controller")
         self.end_effector = G1EndEffector(self.end_effector)  # from Python it is still a string
         self.sim_env = UnitreeG1MujocoEnv(
             publish_images=self.sim_publish_images,

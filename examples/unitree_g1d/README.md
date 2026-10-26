@@ -1,5 +1,7 @@
 # Server side
 
+For combined PICO arm control, see [PICO to G1-D teleoperation](TELEOP_PICO4.md).
+
 ssh unitree@192.168.0.89
 
 1

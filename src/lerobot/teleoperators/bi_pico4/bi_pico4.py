@@ -129,7 +129,7 @@ class BiPico4(Teleoperator):
 
         Call this in a background thread while the robot is connecting/moving to
         start position, then call connect() with the TCP poses once the robot is ready.
-        The SDK init and controller validation (~3s) will overlap with robot startup.
+        The SDK init and controller wait (up to 15s) will overlap with robot startup.
         """
         if self._xrt is not None:
             return  # Already pre-initialized
@@ -143,22 +143,7 @@ class BiPico4(Teleoperator):
             self._xrt = xrt
             self.logger.info("XenseVR SDK pre-initialized.")
 
-            time.sleep(0.5)
-            max_retries = 25
-            for attempt in range(max_retries):
-                left_pose = xrt.get_left_controller_pose()
-                right_pose = xrt.get_right_controller_pose()
-                left_ok = any(abs(v) > 1e-6 for v in left_pose)
-                right_ok = any(abs(v) > 1e-6 for v in right_pose)
-                if left_ok and right_ok:
-                    self.logger.info(f"Both controllers ready after pre_init (attempt {attempt + 1})")
-                    return
-                time.sleep(0.1)
-
-            self._close_sdk()
-            raise DeviceNotConnectedError(
-                "Pico4 controllers not detected after waiting. Ensure the VR client app is running and controllers are on."
-            )
+            self._wait_for_controllers()
         except Exception:
             self._close_sdk()
             raise
@@ -237,24 +222,7 @@ class BiPico4(Teleoperator):
                 self._xrt = xrt
                 self.logger.info("XenseVR SDK initialized.")
 
-                # Wait for both controllers to report valid pose data
-                time.sleep(0.5)
-                max_retries = 25
-                for attempt in range(max_retries):
-                    left_pose = xrt.get_left_controller_pose()
-                    right_pose = xrt.get_right_controller_pose()
-                    left_ok = any(abs(v) > 1e-6 for v in left_pose)
-                    right_ok = any(abs(v) > 1e-6 for v in right_pose)
-                    if left_ok and right_ok:
-                        self.logger.info(f"Both controllers ready (attempt {attempt + 1})")
-                        break
-                    time.sleep(0.1)
-                else:
-                    self._close_sdk()
-                    raise DeviceNotConnectedError(
-                        "Pico4 controllers not detected after waiting. "
-                        "Ensure the VR client app is running and controllers are on."
-                    )
+                self._wait_for_controllers()
             else:
                 # pre_init() was already called — reuse the existing xrt handle
                 self.logger.info("XenseVR SDK already pre-initialized, skipping init.")
@@ -280,6 +248,31 @@ class BiPico4(Teleoperator):
         except Exception as e:
             self._close_sdk()
             raise DeviceNotConnectedError(f"Failed to connect BiPico4: {e}") from e
+
+    def _wait_for_controllers(self) -> None:
+        """Allow delayed tracking startup; a service connection alone is insufficient."""
+        ready = {}
+        for attempt in range(150):  # Up to 15 seconds at 10 Hz.
+            for side in ("left", "right"):
+                pose = np.asarray(getattr(self._xrt, f"get_{side}_controller_pose")(), dtype=float)
+                ready[side] = (
+                    pose.shape == (7,) and np.isfinite(pose).all() and np.linalg.norm(pose[3:]) > 1e-6
+                )
+            if all(ready.values()):
+                self.logger.info("Both PICO controller poses are available")
+                return
+            if attempt % 10 == 0:
+                self.logger.warning(
+                    "Waiting for PICO tracking: left=%s, right=%s",
+                    *["ready" if ready[side] else "missing" for side in ("left", "right")],
+                )
+            time.sleep(0.1)
+        raise DeviceNotConnectedError(
+            "No PICO controller poses after 15s "
+            f"(left={'ready' if ready['left'] else 'missing'}, right={'ready' if ready['right'] else 'missing'}). "
+            "Enable Tracking > Controller and Data & Control > Send in the headset app, "
+            "and wake both controllers. A headset connection alone does not provide tracking."
+        )
 
     def _init_pico4_instance(self, pico4: Pico4, xrt, tcp_pose_quat: np.ndarray) -> None:
         """Inject shared xrt handle and seed initial pose into a Pico4 instance.
@@ -343,6 +336,40 @@ class BiPico4(Teleoperator):
         return {f"left_{k}": v for k, v in left_action.items()} | {
             f"right_{k}": v for k, v in right_action.items()
         }
+
+    def get_arm_enabled(self) -> dict[str, bool]:
+        """Return grip enable states from the last get_action(), with Pico hysteresis."""
+        return {"left": self._left_pico4._enabled, "right": self._right_pico4._enabled}
+
+    def get_control_status(self) -> tuple[int, dict[str, float]]:
+        """Return source-stream timestamp and grips, rejecting invalid raw poses.
+
+        The timestamp covers the stream, not per-controller tracking confidence.
+        Its progression distinguishes a stationary controller from a stalled stream.
+        """
+        if not self.is_connected or self._xrt is None:
+            raise DeviceNotConnectedError("PICO is disconnected")
+        grips = {}
+        for side in ("left", "right"):
+            pose = np.asarray(getattr(self._xrt, f"get_{side}_controller_pose")(), dtype=float)
+            grip = float(getattr(self._xrt, f"get_{side}_grip")())
+            if (
+                pose.shape != (7,)
+                or not np.isfinite(pose).all()
+                or np.linalg.norm(pose[3:]) < 1e-6
+                or not np.isfinite(grip)
+                or not 0 <= grip <= 1
+            ):
+                raise ValueError(f"Invalid {side} controller sample")
+            grips[side] = grip
+        return int(self._xrt.get_time_stamp_ns()), grips
+
+    def reset_arm_to_pose(self, side: str, pose: np.ndarray) -> None:
+        """Rebase one arm's clutch to [x,y,z,qw,qx,qy,qz] without affecting the other."""
+        if side not in ("left", "right"):
+            raise ValueError("Side must be left or right")
+        child = self._left_pico4 if side == "left" else self._right_pico4
+        child.reset_to_pose(pose)
 
     def reset_to_pose(
         self,
