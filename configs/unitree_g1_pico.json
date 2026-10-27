@@ -5,6 +5,18 @@
     "is_simulation": false,
     "arm_commands_only": true,
     "gravity_compensation": true,
+    "cameras": {
+      "head_camera": {
+        "type": "zmq",
+        "server_address": "192.168.123.164",
+        "port": 5555,
+        "camera_name": "head_camera",
+        "width": 640,
+        "height": 480,
+        "fps": 30,
+        "color_mode": "rgb"
+      }
+    },
     "kp": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 300, 0, 300, 80, 80, 80, 80, 40, 40, 40, 80, 80, 80, 80, 40, 40, 40],
     "kd": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 3, 3, 3, 3, 3, 1.5, 1.5, 1.5, 3, 3, 3, 3, 1.5, 1.5, 1.5]
   },

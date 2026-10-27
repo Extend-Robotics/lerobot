@@ -57,9 +57,17 @@ lerobot-rollout --config_path=configs/unitree_g1_pico.json \
   --robot.robot_ip=<ROBOT_IP> --policy.path=<JOINT_POLICY> --fps=30
 ```
 
+The shared configuration enables a remote head camera. Start its publisher first,
+as described in [Head camera on a separate machine](HEAD_CAMERA.md). Camera and
+motor bridges are separate services; changing `robot.robot_ip` does not change
+`robot.cameras.head_camera.server_address`. Set both addresses when overriding the
+example IP by editing the JSON, or override the whole `--robot.cameras` dictionary
+as shown in the head-camera guide. Dictionary entries cannot be overridden using
+`--robot.cameras.head_camera.server_address`. This applies to teleoperation and rollout too.
+
 For policy-only deployment, omit the teleop section from the configuration.
 PICO is used only for human input/corrections; policy output bypasses XR mapping
-and IK. Configure cameras in `robot.cameras` when collecting visual observations.
+and IK. Configure additional cameras in `robot.cameras` when collecting visual observations.
 This repository's collection command is `lerobot-record`.
 
 Arm-only mode advertises exactly 14 arm `.q` features and any configured hand

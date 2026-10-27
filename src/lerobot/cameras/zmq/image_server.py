@@ -19,6 +19,7 @@ Streams camera images over ZMQ.
 Uses lerobot's OpenCVCamera for capture, encodes images to base64 and sends them over ZMQ.
 """
 
+import argparse
 import base64
 import contextlib
 import json
@@ -39,7 +40,10 @@ logger = logging.getLogger(__name__)
 
 def encode_image(image: np.ndarray, quality: int = 80) -> str:
     """Encode RGB image to base64 JPEG string."""
-    _, buffer = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    success, buffer = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    if not success:
+        raise RuntimeError("Failed to encode camera image")
     return base64.b64encode(buffer).decode("utf-8")
 
 
@@ -132,14 +136,17 @@ class ImageServer:
         for capture_thread in self.capture_threads.values():
             capture_thread.start()
 
-        # Wait for first frames to be captured and encoded
-        logger.info("Waiting for cameras to start capturing...")
-        for name, capture_thread in self.capture_threads.items():
-            while capture_thread.get_latest()[0] is None:
-                time.sleep(0.01)
-            logger.info(f"Camera {name} ready (capture + encode in background)")
-
         try:
+            # Include startup in cleanup and fail if capture never produces a frame.
+            logger.info("Waiting for cameras to start capturing...")
+            deadline = time.monotonic() + 10
+            for name, capture_thread in self.capture_threads.items():
+                while capture_thread.get_latest()[0] is None:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"Camera {name} did not produce a frame within 10 seconds")
+                    time.sleep(0.01)
+                logger.info(f"Camera {name} ready (capture + encode in background)")
+
             while True:
                 t0 = time.time()
 
@@ -177,7 +184,32 @@ class ImageServer:
             self.context.term()
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Publish a head camera from the robot without starting the motor bridge."""
+    parser = argparse.ArgumentParser(description="Stream the robot head camera to a remote LeRobot client")
+    parser.add_argument("--device", default="4", help="Camera index or stable /dev/v4l/by-id/... device path")
+    parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument("--width", type=int, default=640)
+    parser.add_argument("--height", type=int, default=480)
+    parser.add_argument("--port", type=int, default=5555)
+    parser.add_argument("--fourcc", default="MJPG", help="Capture format, e.g. MJPG or YUYV")
+    args = parser.parse_args()
+    if min(args.fps, args.width, args.height) <= 0 or not 1 <= args.port <= 65535:
+        parser.error("FPS and dimensions must be positive; port must be between 1 and 65535")
+    device = int(args.device) if args.device.isdecimal() else args.device
     logging.basicConfig(level=logging.INFO)
-    config = {"fps": 30, "cameras": {"head_camera": {"device_id": 4, "shape": [480, 640]}}}
-    ImageServer(config, port=5555).run()
+    config = {
+        "fps": args.fps,
+        "cameras": {
+            "head_camera": {
+                "device_id": device,
+                "shape": [args.height, args.width],
+                "fourcc": args.fourcc,
+            }
+        },
+    }
+    ImageServer(config, port=args.port).run()
+
+
+if __name__ == "__main__":
+    main()

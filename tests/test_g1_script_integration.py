@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import numpy as np
+import pytest
 import torch
 
 from lerobot.processor import make_default_processors
@@ -28,11 +29,18 @@ def test_shared_cli_configuration_decodes_for_teleop_and_record():
             "--dataset.repo_id=local/test",
             "--dataset.single_task=test",
             "--robot.left_hand.transport=zmq",
+            '--robot.cameras={head_camera: {type: zmq, server_address: "192.168.0.89", '
+            "camera_name: head_camera, width: 640, height: 480, fps: 30}}",
         ],
     )
     assert teleop.robot.arm_commands_only and record.robot.arm_commands_only
     assert teleop.teleop.output_mode == record.teleop.output_mode == "xr"
     assert record.robot.left_hand.transport == "zmq"
+    assert record.robot.cameras["head_camera"].server_address == "192.168.0.89"
+    for config in (teleop, record):
+        head = config.robot.cameras["head_camera"]
+        assert head.type == "zmq" and head.camera_name == "head_camera"
+        assert (head.width, head.height, head.fps) == (640, 480, 30)
 
 
 def test_standard_teleop_does_not_request_pico_feedback(pipeline_state):
@@ -53,7 +61,8 @@ def test_standard_teleop_does_not_request_pico_feedback(pipeline_state):
     robot.send_action.assert_called_once_with(dict.fromkeys(ARM_KEYS, 0.2))
 
 
-def test_standard_record_saves_accepted_joint_targets(pipeline_state):
+@pytest.mark.parametrize("with_camera", [False, True])
+def test_standard_record_saves_accepted_joint_targets(pipeline_state, with_camera):
     from lerobot.scripts.lerobot_record import record_loop
 
     s = pipeline_state
@@ -70,6 +79,14 @@ def test_standard_record_saves_accepted_joint_targets(pipeline_state):
         key: {"dtype": "float32", "shape": (14,), "names": list(ARM_KEYS)}
         for key in ("action", "observation.state")
     }
+    if with_camera:
+        image = np.full((24, 32, 3), 127, dtype=np.uint8)
+        robot.get_observation.return_value = {**s.observation, "head_camera": image}
+        dataset.features["observation.images.head_camera"] = {
+            "dtype": "video",
+            "shape": image.shape,
+            "names": ["height", "width", "channels"],
+        }
     _, robot_processor, obs_processor = make_default_processors()
     record_loop(
         robot,
@@ -87,6 +104,8 @@ def test_standard_record_saves_accepted_joint_targets(pipeline_state):
     frame = dataset.add_frame.call_args.args[0]
     np.testing.assert_allclose(frame["action"], np.full(14, 0.12))
     np.testing.assert_array_equal(frame["observation.state"], np.zeros(14))
+    if with_camera:
+        np.testing.assert_array_equal(frame["observation.images.head_camera"], image)
 
 
 def test_rollout_keeps_g1_joint_state_actions_and_order(monkeypatch):
