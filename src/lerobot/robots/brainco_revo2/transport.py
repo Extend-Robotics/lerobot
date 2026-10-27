@@ -90,6 +90,8 @@ class DdsHandTransport:
 class ZmqHandTransport:
     def __init__(self, config: BraincoRevo2HandConfig):
         self.config = config
+        # Composite G1 feedback is read by both IK and the arm publisher.
+        self._read_lock = threading.Lock()
         self.subscriber: zmq.Socket | None = None
         self.publisher: zmq.Socket | None = None
         self._sample: tuple[list[float], float] | None = None
@@ -113,6 +115,10 @@ class ZmqHandTransport:
             self.publisher.connect(f"tcp://{self.config.robot_ip}:{command_port}")
 
     def read(self) -> tuple[list[float], float] | None:
+        with self._read_lock:
+            return self._read_locked()
+
+    def _read_locked(self) -> tuple[list[float], float] | None:
         import zmq
 
         if self.subscriber is None:

@@ -54,20 +54,13 @@ def head_yaw_rotation(head_rotation: np.ndarray) -> np.ndarray:
     return np.column_stack([x_axis, y_axis, z_axis])
 
 
-def map_xr_wrist_targets(
-    poses: dict[str, np.ndarray], *, hand_tracking: bool = False
-) -> tuple[np.ndarray, np.ndarray]:
-    """Map controller or OpenXR hand wrists into Unitree arm tool frames."""
+def map_xr_wrist_targets(poses: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    """Map controller poses into Unitree arm tool frames."""
     head = ROBOT_FROM_XR @ sdk_pose_to_matrix(poses["head"]) @ ROBOT_FROM_XR.T
     yaw = head_yaw_rotation(head[:3, :3])
     targets = []
     for side in SIDES:
         wrist = ROBOT_FROM_XR @ sdk_pose_to_matrix(poses[side]) @ ROBOT_FROM_XR.T
-        if hand_tracking:
-            # televuer's T_TO_UNITREE_HUMANOID_{LEFT,RIGHT}_ARM, applied
-            # after changing the OpenXR basis (local wrist frame correction).
-            angle = np.pi / 2 if side == "left" else -np.pi / 2
-            wrist[:3, :3] = wrist[:3, :3] @ Rotation.from_euler("x", angle).as_matrix()
         wrist[:3, :3] = yaw.T @ wrist[:3, :3]
         wrist[:3, 3] = yaw.T @ (wrist[:3, 3] - head[:3, 3])
         # Upstream fixed head -> waist origin translation, in metres.

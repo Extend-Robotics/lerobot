@@ -197,7 +197,6 @@ unitree_g1 = [
     "lerobot[pygame-dep]",
 ]
 # PICO SDK is installed separately using scripts/pico4/install_sdk.sh.
-pico_revo2 = ["dex-retargeting==0.5.0; python_version < '3.13'", "lerobot[scipy-dep]", "lerobot[pyzmq-dep]"]
 # reachy2-sdk caps grpcio<=1.73.1 and protobuf<=6.32.0; quarantined here so downstream users aren't held back. reachy2-sdk is unlikely to release new versions.
 reachy2 = [
     "reachy2_sdk>=1.0.15,<1.1.0",

@@ -1,11 +1,11 @@
-# PICO controllers or hands to G1-D: Unitree XR mapping and IK
+# PICO controllers to G1-D: Unitree XR mapping and IK
 
 The default launcher now uses the G1-29 controller mapping, IK objective, solver
 options, joint filter, gravity feedforward and arm gains from
 [`unitreerobotics/xr_teleoperate`](https://github.com/unitreerobotics/xr_teleoperate/tree/817fb00c63cde15e5f24a0f8fa08e1e33ed89d3b).
 Source revisions and licenses are recorded in [UNITREE_XR_NOTICES.md](UNITREE_XR_NOTICES.md).
 The native PICO SDK and the existing robot-side JSON/ZMQ-to-DDS bridge remain the
-hardware adapters. No robot-side update or reinstall is needed.
+hardware adapters. Arm-only operation needs no robot-side update or reinstall.
 
 ## Launch
 
@@ -41,53 +41,43 @@ The launcher uses `../envs/unitree-g1/bin/python`. Override with
 Unitree SDK, Pinocchio with CasADi, and the PICO SDK. Install the PICO binding with
 `PICO_PYTHON=/path/to/python bash scripts/pico4/install_sdk.sh` if needed.
 
-## Bare hands controlling arms
+## Controllers with trigger-controlled Revo2 hands
 
-Enable hand tracking and headset tracking in the PICO headset app, and enable
-sending data. Controllers are not needed. Only the tracked wrist poses are used;
-finger motion, pinch and grasp gestures send no robot hand or gripper commands.
-The headset client must send OpenXR-order 26-joint hand arrays in the same world
-frame as its headset pose (palm index 0, wrist index 1; metres, xyzw quaternions).
-
-Rebuild the native Python binding once to expose coherent hand packets:
+Keep the usual body bridge and the independent hand bridge running on the robot.
+For execution, run the hand bridge without `--read-only`:
 
 ```bash
-PICO_PYTHON=../envs/unitree-g1/bin/python bash scripts/pico4/install_sdk.sh
+python -m lerobot.robots.brainco_revo2.bridge
 ```
 
-Preview, then enable movement after checking alignment:
+Enable headset and both controller tracking in the PICO app, then preview:
 
 ```bash
-bash scripts/pico4/teleop_g1d.sh --robot-ip <ROBOT_IP> --input hands
-bash scripts/pico4/teleop_g1d.sh --robot-ip <ROBOT_IP> --input hands --execute
+bash scripts/pico4/teleop_g1d.sh --robot-ip 192.168.0.89 --hands both
 ```
 
-Execution requires `r` then Enter, followed by a two-second delay to return your
-hands to the tracking area. Both hands must be visible and valid when the delay
-ends. `p` then Enter pauses both arms and cancels a pending start; `r` resumes
-after the same two-second delay; `q` exits. Repeating `r` restarts the countdown. Preview tries to start immediately;
-if tracking is not ready, press `r` once both hands are visible. Tracking recovery
-never resumes movement automatically. Hand mode does not wait for controller
-poses or read controller buttons. The default remains `--input controllers`.
+Add `--execute` to enable movement. `r` then Enter starts arms and fingers
+together after two seconds; `p` then Enter pauses both; `r` resumes; `q` exits.
+Each controller trigger controls its corresponding hand: released (`0`) opens
+all six motors, fully pulled (`1`) closes them, and intermediate values produce
+proportional closure. Controller poses provide the absolute head-yaw-relative
+arm targets. Grip buttons do not clutch the arms.
 
-The existing absolute head-yaw-relative mapping and arm IK are retained, with
-televuer's left/right OpenXR hand wrist frame corrections. Preview prints the
-mapped wrist target matrices and IK residuals. Verify the left/right sides,
-translations and wrist rotations with the installed headset app before execution;
-physical wrist alignment and tracking quality have not been hardware validated.
-Hand mode uses the same speed clipping as controllers: the upstream 30 rad/s
-parameter with a fixed 4 ms period, clipping targets against measured joints.
-There is no extra hand-mode speed limit, including at start and resume. Preview
-bypasses clipping, as in controller mode. Feedforward uses measured arm joints.
+Use `--hands left` or `right` for one hand; `--hands none` (default) controls
+arms only. Finger targets update at `--fps` (default 30 Hz), with
+`--hand-max-speed` limiting normalized position change per second (default 1.0)
+and `--hand-motor-speed` setting driver speed (default 0.3). Rate limiting starts
+from measured positions on each resume. The arm publisher runs at a requested
+250 Hz. Reports include `hand_target_action` and `hand_sent_action` (empty in
+preview). `--hand-transport dds` and `--hand-network-interface` allow direct hand DDS.
 
-Missing/inactive hands, invalid wrist/head poses, old received packets or stalled
-source timestamps pause both arms. Head and both hands must be present in the
-same packet; cached skeletons cannot be kept alive by headset-only updates.
-Tracking is checked again after IK. During a pause the publisher holds the last
-command with gravity support while robot feedback and communication are healthy.
-**After five seconds paused, the process exits and existing cleanup makes the
-arms and waist passive.** Support the robot accordingly. Feedback, IK or transport
-faults still stop execution immediately. This adds no robot-side network watchdog.
+Controller input is revalidated after IK. Unstable, restarted or stalled samples
+latch a pause requiring `r`. During pause, finger updates stop and arms hold
+the last published command with gravity support for at most five seconds, then
+cleanup makes arms and waist passive. Invalid poses or triggers, stale robot
+feedback, IK failures and transport faults stop execution. Disconnect sends no
+hand gesture; the driver's last finger target may remain active. The SDK
+timestamp covers the stream rather than per-controller tracking confidence.
 
 ## Upstream behavior
 

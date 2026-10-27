@@ -222,6 +222,42 @@ def test_zmq_read_only_lifecycle_and_age():
         socket.close.assert_called_once_with(linger=0)
 
 
+def test_zmq_feedback_reads_are_serialized_between_ik_and_publisher():
+    pytest.importorskip("zmq")
+    transport = ZmqHandTransport(BraincoRevo2HandConfig(read_only=True))
+    entered = threading.Event()
+    release = threading.Event()
+    second_started = threading.Event()
+    second_entered = threading.Event()
+
+    def receive(**kwargs):
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(2)
+        else:
+            second_entered.set()
+        return {"side": "left", "positions": [0.2] * 6, "age_s": 0, "observed_at": time.time()}
+
+    transport.subscriber = MagicMock()
+    transport.subscriber.recv_json.side_effect = receive
+
+    def second_read():
+        second_started.set()
+        return transport.read()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(transport.read)
+        try:
+            assert entered.wait(2)
+            second = pool.submit(second_read)
+            assert second_started.wait(2)
+            assert not second_entered.wait(0.1)
+        finally:
+            release.set()
+        assert first.result(timeout=2)[0] == second.result(timeout=2)[0] == [0.2] * 6
+        assert second_entered.is_set()
+
+
 def test_g1_nested_config_cli_and_simulation_rejection():
     from lerobot.robots.unitree_g1.config_unitree_g1 import UnitreeG1Config
 

@@ -160,7 +160,6 @@ _zmq_available = is_package_available("pyzmq", import_name="zmq")
 _hebi_available = is_package_available("hebi-py", import_name="hebi")
 _teleop_available = is_package_available("teleop")
 _placo_available = is_package_available("placo")
-_dex_retargeting_available = is_package_available("dex-retargeting", import_name="dex_retargeting")
 _hidapi_available = is_package_available("hidapi", import_name="hid")
 
 # Data / serialization

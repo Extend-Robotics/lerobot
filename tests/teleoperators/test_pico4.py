@@ -117,6 +117,50 @@ def test_raw_xr_sample_includes_head_and_bypasses_clutch_mapping(sdk):
         teleop.disconnect()
 
 
+def test_controller_sample_retries_stream_changes_and_reads_raw_triggers(sdk):
+    sdk.get_headset_pose.return_value = [0, 1.5, 0, 0, 0, 0, 1]
+    teleop = BiPico4(BiPico4Config())
+    try:
+        teleop.connect()
+        sdk.get_time_stamp_ns.side_effect = [1, 1, 2, 2, 2, 2]
+        sdk.get_left_trigger.return_value = 0.25
+        sdk.get_right_trigger.return_value = 0.75
+        stamp, poses, triggers = teleop.get_controller_sample()
+        assert stamp == 2
+        assert set(poses) == {"head", "left", "right"}
+        assert triggers == {"left": 0.25, "right": 0.75}
+        sdk.get_hand_input_sample.assert_not_called()
+        sdk.get_left_grip.assert_not_called()
+    finally:
+        teleop.disconnect()
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1, float("nan")])
+def test_controller_sample_rejects_invalid_trigger(sdk, value):
+    sdk.get_headset_pose.return_value = [0, 1.5, 0, 0, 0, 0, 1]
+    sdk.get_time_stamp_ns.return_value = 123
+    teleop = BiPico4(BiPico4Config())
+    try:
+        teleop.connect()
+        sdk.get_left_trigger.return_value = value
+        with pytest.raises(ValueError, match="trigger"):
+            teleop.get_controller_sample()
+    finally:
+        teleop.disconnect()
+
+
+def test_controller_sample_rejects_unstable_stream(sdk):
+    sdk.get_headset_pose.return_value = [0, 1.5, 0, 0, 0, 0, 1]
+    teleop = BiPico4(BiPico4Config())
+    try:
+        teleop.connect()
+        sdk.get_time_stamp_ns.side_effect = range(1, 10)
+        with pytest.raises(RuntimeError):
+            teleop.get_controller_sample()
+    finally:
+        teleop.disconnect()
+
+
 def test_rebase_one_arm_preserves_other_target(sdk):
     teleop = BiPico4(BiPico4Config())
     try:

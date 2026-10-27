@@ -12,15 +12,16 @@ from examples.unitree_g1d import teleop_pico4
 @pytest.mark.parametrize(
     "input_mode, keys, expected_starts",
     [
-        ("hands", [(0.0, "r")], [2.0]),
         ("controllers", [(0.0, "r")], [2.0]),
-        ("hands", [(0.0, "r"), (0.5, "p")], []),
-        ("hands", [(0.0, "r"), (0.5, "q")], []),
-        ("hands", [(0.0, "r"), (0.5, "r")], [2.5]),
-        ("hands", [(0.0, "r"), (2.2, "p"), (2.3, "r")], [2.0, 4.3]),
+        ("controller_hands", [(0.0, "r")], [2.0]),
+        ("controller_hands", [(0.0, "r"), (0.5, "p")], []),
+        ("controller_hands", [(0.0, "r"), (0.5, "q")], []),
+        ("controller_hands", [(0.0, "r"), (2.2, "p"), (2.3, "r")], [2.0, 4.3]),
     ],
 )
 def test_start_delay_keeps_loop_running(monkeypatch, input_mode, keys, expected_starts):
+    combined = input_mode == "controller_hands"
+    input_mode = "controllers"
     now = [0.0]
     pending = list(keys)
     started = []
@@ -32,7 +33,6 @@ def test_start_delay_keeps_loop_running(monkeypatch, input_mode, keys, expected_
     teleop = Mock(is_connected=True)
     for name, value in (
         ("UnitreeG1", robot),
-        ("PicoHandInput", teleop),
         ("BiPico4", teleop),
         ("UnitreeG1Config", Mock()),
         ("PicoHandArmSession", session),
@@ -62,6 +62,7 @@ def test_start_delay_keeps_loop_running(monkeypatch, input_mode, keys, expected_
             "10",
             "--duration",
             "5",
+            *(["--hands", "both"] if combined else []),
         ],
     )
     teleop_pico4.main()
@@ -73,3 +74,6 @@ def test_start_delay_keeps_loop_running(monkeypatch, input_mode, keys, expected_
         session.pause.assert_called_once()
     session.close.assert_called_once()
     robot.disconnect.assert_called_once()
+    if combined:
+        config = teleop_pico4.UnitreeG1Config.call_args.kwargs
+        assert config["left_hand"].transport == config["right_hand"].transport == "zmq"
