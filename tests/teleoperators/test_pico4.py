@@ -1,13 +1,11 @@
 """PICO mapping and lifecycle tests; no headset or native SDK required."""
 
 from itertools import chain, repeat
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 
-from lerobot.robots.unitree_g1.pico_teleop import ARM_KEYS, PicoArmSession
 from lerobot.teleoperators.bi_pico4 import BiPico4, BiPico4Config, bi_pico4 as bi_module
 from lerobot.teleoperators.pico4 import Pico4, Pico4Config, teleop_pico4 as single_module
 from lerobot.teleoperators.utils import make_teleoperator_from_config
@@ -194,58 +192,26 @@ def test_cached_grip_states_use_pico_hysteresis(sdk):
         teleop.disconnect()
 
 
-def test_g1_session_uses_real_pico_clutch_and_rebases_limited_commands(sdk):
-    now = [1.0]
-    robot = MagicMock()
-    robot.config = SimpleNamespace(read_only=False, arm_commands_only=True, gravity_compensation=False)
-    robot.control_space, robot.controller = "cartesian_abs", None
-    robot.state_age_s.return_value = 0.0
-    robot.get_observation.return_value = dict.fromkeys(ARM_KEYS, 0.0)
-    solver = robot.arm_ik
-
-    def fk(q):
-        poses = [np.eye(4), np.eye(4)]
-        poses[0][0, 3], poses[1][0, 3] = q[0], q[7]
-        return tuple(poses)
-
-    def solve(left, right, q, **kwargs):
-        q = q.copy()
-        q[0], q[7] = left[0, 3], right[0, 3]
-        return q, np.zeros(14)
-
-    solver.forward_kinematics.side_effect = fk
-    solver.solve_ik.side_effect = solve
-    solver.last_solve_success = True
-    solver._arm_reorder_pin_to_g1 = np.arange(14)
-    solver.reduced_robot.model = SimpleNamespace(
-        lowerPositionLimit=np.full(14, -1.0), upperPositionLimit=np.full(14, 1.0)
-    )
-    teleop = BiPico4(
-        BiPico4Config(pos_sensitivity=1.0, filter_window_size=1, max_pos_velocity=0.0, max_rot_velocity=0.0)
-    )
-    session = PicoArmSession(robot, teleop, clock=lambda: now[0])
-
-    def tick():
-        now[0] += 1 / 30
-        sdk.get_time_stamp_ns.return_value = int(now[0] * 1e9)
-        return session.tick()
-
+def test_raw_actions_validate_stream_age_and_restarts(sdk, monkeypatch):
+    now = [10.0]
+    monkeypatch.setattr(bi_module.time, "monotonic", lambda: now[0])
+    sdk.get_headset_pose.return_value = [0, 1.5, 0, 0, 0, 0, 1]
+    sdk.get_time_stamp_ns.return_value = 1
+    teleop = BiPico4(BiPico4Config(output_mode="xr"))
+    teleop.connect()
     try:
-        session.initialize()
-        assert tick()["status"] == "waiting"
-        assert tick()["status"] == "ready"
-        sdk.get_left_grip.return_value = 1.0
-        tick()
-        sdk.get_left_controller_pose.return_value = [0, 0, -0.02, 0, 0, 0, 1]
-        moving = tick()
-        assert moving["joint_action"][ARM_KEYS[0]] == pytest.approx(0.01)
-        assert moving["joint_action"][ARM_KEYS[7]] == 0.0
-        sdk.get_left_grip.return_value = 0.0
-        assert tick()["joint_action"] == pytest.approx(moving["joint_action"])
-        sdk.get_left_grip.return_value = 1.0
-        assert tick()["joint_action"] == pytest.approx(moving["joint_action"])
-        sdk.get_left_controller_pose.return_value = [0, 0, -0.025, 0, 0, 0, 1]
-        assert tick()["joint_action"][ARM_KEYS[0]] == pytest.approx(0.015)
+        action = teleop.get_action()
+        assert set(action) == set(teleop.action_features)
+        assert action["head.y"] == 1.5
+        assert action["sample_time"] == 10.0
+        now[0] += 0.3
+        with pytest.raises(TimeoutError, match="stale"):
+            teleop.get_action()
+        sdk.get_time_stamp_ns.return_value = 2
+        assert teleop.get_action()["sample_time"] == now[0]
+        sdk.get_time_stamp_ns.return_value = 1
+        with pytest.raises(TimeoutError, match="restarted"):
+            teleop.get_action()
     finally:
         teleop.disconnect()
 

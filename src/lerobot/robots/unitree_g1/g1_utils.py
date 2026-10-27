@@ -157,24 +157,3 @@ class G1_29_JointIndex(IntEnum):
     kRightWristRoll = 26
     kRightWristPitch = 27
     kRightWristYaw = 28
-
-
-def action_to_pose(action: dict[str, float], side: str) -> np.ndarray:
-    """Decode first-two-column rotations, rejecting invalid or degenerate data."""
-    values = np.array(
-        [action[f"{side}_tcp.{field}"] for field in ("x", "y", "z", "r1", "r2", "r3", "r4", "r5", "r6")]
-    )
-    if not np.isfinite(values).all():
-        raise ValueError("Nonfinite controller target")
-    first, second = values[3:6].copy(), values[6:9].copy()
-    if np.linalg.norm(first) < 1e-6:
-        raise ValueError("Degenerate target rotation")
-    first /= np.linalg.norm(first)
-    second -= first * np.dot(first, second)
-    if np.linalg.norm(second) < 1e-6:
-        raise ValueError("Degenerate target rotation")
-    second /= np.linalg.norm(second)
-    pose = np.eye(4)
-    pose[:3, :3] = np.column_stack((first, second, np.cross(first, second)))
-    pose[:3, 3] = values[:3]
-    return pose

@@ -86,6 +86,8 @@ class BiPico4(Teleoperator):
         self._is_connected = False
         self._xrt = None
         self.logger = logging.getLogger("BiPico4")
+        self._source_stamp: int | None = None
+        self._source_at = 0.0
 
         # Edge detection for the controller button currently used by teleop / record flows
         self._was_reset_button_pressed: bool = False
@@ -159,6 +161,16 @@ class BiPico4(Teleoperator):
     @property
     def action_features(self) -> dict[str, type]:
         """Cartesian target fields emitted by get_action()."""
+        if self.config.output_mode == "xr":
+            return dict.fromkeys(
+                [
+                    f"{side}.{field}"
+                    for side in ("head", "left", "right")
+                    for field in ("x", "y", "z", "qx", "qy", "qz", "qw")
+                ]
+                + ["left.trigger", "right.trigger", "sample_time"],
+                float,
+            )
         return dict.fromkeys(
             [
                 "left_tcp.x",
@@ -233,6 +245,8 @@ class BiPico4(Teleoperator):
             self._init_pico4_instance(self._right_pico4, self._xrt, right_tcp_pose_quat)
 
             self._is_connected = True
+            self._source_stamp = None
+            self._source_at = time.monotonic()
 
             # Seed edge-detection state from the actual current A-button state so
             # that a held button at connect time does not fire as a false
@@ -330,6 +344,24 @@ class BiPico4(Teleoperator):
         if not self._is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
+        if self.config.output_mode == "xr":
+            stamp, poses, triggers = self.get_controller_sample()
+            now = time.monotonic()
+            if stamp <= 0 or (self._source_stamp is not None and stamp < self._source_stamp):
+                raise TimeoutError("PICO source timestamp restarted or is invalid")
+            if self._source_stamp is None or stamp > self._source_stamp:
+                self._source_at = now
+            self._source_stamp = stamp
+            if now - self._source_at > self.config.input_timeout_s:
+                raise TimeoutError("PICO controller stream is stale")
+            result = {
+                f"{side}.{field}": float(value)
+                for side, pose in poses.items()
+                for field, value in zip(("x", "y", "z", "qx", "qy", "qz", "qw"), pose, strict=True)
+            }
+            result.update({f"{side}.trigger": value for side, value in triggers.items()})
+            result["sample_time"] = self._source_at
+            return result
         left_action = self._left_pico4.get_action()
         right_action = self._right_pico4.get_action()
 

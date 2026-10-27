@@ -199,6 +199,7 @@ from lerobot.teleoperators import (  # noqa: F401
     TeleoperatorConfig,
     bi_openarm_leader,
     bi_openarm_mini,
+    bi_pico4,
     bi_rebot_102_leader,
     bi_so_leader,
     homunculus,

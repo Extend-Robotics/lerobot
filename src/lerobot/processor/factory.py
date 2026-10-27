@@ -78,8 +78,19 @@ def make_default_robot_observation_processor() -> RobotProcessorPipeline[RobotOb
     return robot_observation_processor
 
 
-def make_default_processors():
+def make_default_processors(robot=None, teleop=None):
     teleop_action_processor = make_default_teleop_action_processor()
+    if robot is not None and teleop is not None and robot.name == "unitree_g1" and teleop.name == "bi_pico4":
+        from lerobot.teleoperators.bi_pico4.g1_processor import PicoToG1Joints
+
+        if not robot.config.arm_commands_only or teleop.config.output_mode != "xr":
+            raise ValueError("G1/PICO requires robot.arm_commands_only=true and teleop.output_mode=xr")
+        teleop_action_processor.steps = [
+            PicoToG1Joints(
+                hand_features=tuple(key for key in robot.action_features if "_hand." in key),
+                timeout_s=min(robot.config.command_timeout_s, teleop.config.input_timeout_s),
+            )
+        ]
     robot_action_processor = make_default_robot_action_processor()
     robot_observation_processor = make_default_robot_observation_processor()
     return (teleop_action_processor, robot_action_processor, robot_observation_processor)

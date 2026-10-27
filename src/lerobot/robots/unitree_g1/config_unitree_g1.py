@@ -14,8 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from dataclasses import dataclass, field
-from typing import Literal
 
 from lerobot.cameras import CameraConfig
 from lerobot.envs.configs import G1EndEffector, UnitreeG1MujocoEnv
@@ -50,13 +50,13 @@ _DEFAULT_KP, _DEFAULT_KD = _build_gains()
 @RobotConfig.register_subclass("unitree_g1")
 @dataclass
 class UnitreeG1Config(RobotConfig):
-    # Cartesian modes control only the arms, using left_tcp/right_tcp.{x,y,z,r1-r6}.
-    control_space: Literal["joint", "cartesian_abs", "cartesian_rel"] = "joint"
-    # Unitree's G1-29 XR objective, IPOPT options and output filter.
-    arm_ik_profile: Literal["lerobot", "unitree_xr"] = "lerobot"
     # Read-only suppresses all command writes. Arm-only freezes waist targets and disables legs.
     read_only: bool = False
     arm_commands_only: bool = False
+    # Shared by teleoperation and policy execution in arm-only mode.
+    command_timeout_s: float = 0.25
+    arm_max_step: float = 0.12  # radians from measured joints, scaled across both arms
+    hand_max_speed: float = 1.0  # normalized position units/second
 
     kp: list[float] = field(default_factory=lambda: _DEFAULT_KP.copy())
     kd: list[float] = field(default_factory=lambda: _DEFAULT_KD.copy())
@@ -102,6 +102,9 @@ class UnitreeG1Config(RobotConfig):
 
     def __post_init__(self):
         super().__post_init__()
+        for value in (self.control_dt, self.command_timeout_s, self.arm_max_step, self.hand_max_speed):
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError("Control periods and command limits must be finite and positive")
         if (self.read_only or self.arm_commands_only) and self.controller is not None:
             raise ValueError("Read-only/arm-only operation cannot run a whole-body controller")
         if self.is_simulation and (self.left_hand is not None or self.right_hand is not None):

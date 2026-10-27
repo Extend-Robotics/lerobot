@@ -447,7 +447,9 @@ class DAggerStrategy(RolloutStrategy):
                                 (processed_teleop, obs)
                             )
                         with timer.section("send"):
-                            robot.send_action(robot_action_to_send)
+                            sent = robot.send_action(robot_action_to_send)
+                            if isinstance(sent, dict) and sent.keys() == processed_teleop.keys():
+                                processed_teleop = robot_action_to_send = sent
                         last_action = robot_action_to_send
                         with timer.section("telemetry"):
                             self._log_telemetry(obs_processed, processed_teleop, ctx.runtime)
@@ -654,7 +656,9 @@ class DAggerStrategy(RolloutStrategy):
                         processed_teleop = ctx.processors.teleop_action_processor((teleop_action, obs))
                         robot_action_to_send = ctx.processors.robot_action_processor((processed_teleop, obs))
                     with timer.section("send"):
-                        robot.send_action(robot_action_to_send)
+                        sent = robot.send_action(robot_action_to_send)
+                        if isinstance(sent, dict) and sent.keys() == processed_teleop.keys():
+                            processed_teleop = robot_action_to_send = sent
                     last_action = robot_action_to_send
                     with timer.section("telemetry"):
                         self._log_telemetry(obs_processed, processed_teleop, ctx.runtime)

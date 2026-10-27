@@ -536,20 +536,27 @@ class TestSendAction:
 # ---------------------------------------------------------------------------
 
 
-class TestCartesianControl:
-    def test_prepared_arm_feedforward_torques_reach_only_arm_slots(self, make_robot):
+class TestArmJointControl:
+    def test_disconnect_joins_arm_publisher_before_passivating(self, make_robot):
         factory, mocks = make_robot
-        robot = arm_for_publish(factory(arm_commands_only=True), mocks)
-        robot._lowstate_received_at = time.monotonic()
-        action = {f"{joint.name}.q": 0.1 for joint in G1_29_JointArmIndex}
-        torques = np.arange(14, dtype=float)
-        robot.send_arm_joint_action(action, 0.25, arm_tau=torques)
-        for index, joint in enumerate(G1_29_JointArmIndex):
-            assert robot.msg.motor_cmd[joint].tau == torques[index]
-        assert all(m.tau == 0 for m in robot.msg.motor_cmd[:15])
-        for invalid in (np.zeros(13), np.full(14, np.nan)):
-            with pytest.raises(ValueError, match="feedforward"):
-                robot.send_arm_joint_action(action, 0.25, arm_tau=invalid)
+        robot = factory(arm_commands_only=True)
+        # Use mocked SDK channels while exercising the physical disconnect path.
+        robot.config.is_simulation = False
+        published = threading.Event()
+        mocks["publisher_mock"].Write.side_effect = lambda _: published.set()
+        try:
+            robot.connect()
+            observation = robot.get_observation()
+            robot.send_action({key: observation[key] for key in robot.action_features})
+            assert published.wait(1.0)
+        finally:
+            robot.disconnect()
+        assert not robot._arm_thread.is_alive()
+        assert robot._arm_target is None
+        assert all(motor.kp == motor.kd == motor.tau == 0 for motor in robot.msg.motor_cmd[:29])
+        count = mocks["publisher_mock"].Write.call_count
+        robot._publish_arm_target()
+        assert mocks["publisher_mock"].Write.call_count == count
 
     def test_readonly_has_no_publisher_or_shutdown_write(self, make_robot):
         factory, mocks = make_robot
@@ -564,100 +571,69 @@ class TestCartesianControl:
         robot.disconnect()
         mocks["publisher_mock"].Write.assert_not_called()
 
-    def test_prepared_arm_publication_checks_age_and_excludes_body(self, make_robot):
+    def test_features_are_only_controllable_joint_positions(self, make_robot):
+        factory, _ = make_robot
+        robot = factory(arm_commands_only=True)
+        assert set(robot.action_features) == {f"{joint.name}.q" for joint in G1_29_JointArmIndex}
+        assert robot.observation_features == robot.action_features
+
+    def test_accepted_target_is_bounded_and_publisher_repeats_it(self, make_robot):
+        from lerobot.robots.unitree_g1.unitree_g1 import G1_29_LowState
+
         factory, mocks = make_robot
         robot = arm_for_publish(factory(arm_commands_only=True), mocks)
-        action = {f"{joint.name}.q": 0.1 for joint in G1_29_JointArmIndex}
-        robot._lowstate_received_at = time.monotonic() - 1
-        mocks["publisher_mock"].Write.reset_mock()
-        with pytest.raises(TimeoutError):
-            robot.send_arm_joint_action(action, 0.25)
-        mocks["publisher_mock"].Write.assert_not_called()
-        # The Pico MVP opts out explicitly; default callers still reject old state.
-        robot.send_arm_joint_action(action, 0.25, check_state_age=False)
-        mocks["publisher_mock"].Write.assert_called_once()
-        mocks["publisher_mock"].Write.reset_mock()
-        robot._lowstate_received_at = time.monotonic()
-        robot.send_arm_joint_action(action, 0.25)
-        mocks["publisher_mock"].Write.assert_called_once()
-        for motor in robot.msg.motor_cmd[:12]:
-            assert motor.kp == motor.kd == motor.tau == motor.qd == 0
-        for index in range(12, 15):
-            assert robot.msg.motor_cmd[index].kp == robot.kp[index]
-            assert robot.msg.motor_cmd[index].kd == robot.kd[index]
-        waist_q = robot.msg.motor_cmd[12].q
-        robot.publish_lowcmd({"kWaistYaw.q": 2.0})
-        assert robot.msg.motor_cmd[12].q == waist_q
-        robot.publish_lowcmd(action, passivate_body=True)
-        assert all(motor.kp == motor.kd == 0 for motor in robot.msg.motor_cmd[:15])
-        with pytest.raises(ValueError):
-            robot.send_arm_joint_action({**action, "kWaistYaw.q": 1.0}, 0.25)
-
-    @pytest.mark.parametrize("control_space", ["cartesian_abs", "cartesian_rel"])
-    def test_features_and_observation(self, make_robot, control_space):
-        from lerobot.robots.unitree_g1.unitree_g1 import G1_29_LowState
-
-        factory, _ = make_robot
-        robot = factory(control_space=control_space)
         robot._lowstate = G1_29_LowState()
-        pose = np.eye(4)
-        pose[:3, 3] = [0.3, 0.2, 0.5]
-        pose[:3, :3] = [[0, -1, 0], [1, 0, 0], [0, 0, 1]]
-        robot.arm_ik.forward_kinematics.return_value = (pose, pose)
+        for joint in G1_29_JointArmIndex:
+            robot._lowstate.motor_state[joint].q = 0.0
+        robot._lowstate_received_at = time.monotonic()
+        action = dict.fromkeys(robot.action_features, 1.0)
+        action["kRightShoulderPitch.q"] = 0.5
+        sent = robot.send_action(action)
+        assert sent["kLeftShoulderPitch.q"] == pytest.approx(0.12)
+        assert sent["kRightShoulderPitch.q"] == pytest.approx(0.06)
+        for _ in range(2):
+            robot._publish_arm_target()
+            for joint in G1_29_JointArmIndex:
+                assert robot.msg.motor_cmd[joint].q == sent[f"{joint.name}.q"]
+        assert all(motor.kp == motor.kd == 0 for motor in robot.msg.motor_cmd[:12])
 
-        observation = robot.get_observation()
-
-        assert len(robot.action_features) == 18
-        assert robot.action_features.keys() <= robot.observation_features.keys()
-        for side in ("left", "right"):
-            values = [
-                observation[f"{side}_tcp.{key}"]
-                for key in ("x", "y", "z", "r1", "r2", "r3", "r4", "r5", "r6")
-            ]
-            np.testing.assert_allclose(values, [0.3, 0.2, 0.5, 0, 1, 0, -1, 0, 0])
-
-    @pytest.mark.parametrize("control_space", ["cartesian_abs", "cartesian_rel"])
-    @pytest.mark.parametrize("gravity_compensation", [False, True])
-    def test_targets_and_arm_only_publish(self, make_robot, control_space, gravity_compensation):
+    def test_stale_feedback_and_invalid_commands_cannot_publish(self, make_robot):
         from lerobot.robots.unitree_g1.unitree_g1 import G1_29_LowState
 
         factory, mocks = make_robot
-        robot = arm_for_publish(factory(control_space=control_space), mocks)
-        robot.config.gravity_compensation = gravity_compensation
+        robot = arm_for_publish(factory(arm_commands_only=True), mocks)
         robot._lowstate = G1_29_LowState()
-        measured_q = np.linspace(-0.1, 0.1, 14)
-        for joint, value in zip(G1_29_JointArmIndex, measured_q, strict=True):
-            robot._lowstate.motor_state[joint].q = value
-        current = np.eye(4)
-        current[:3, 3] = [0.3, 0.2, 0.5]
-        current[:3, :3] = [[1, 0, 0], [0, 0, -1], [0, 1, 0]]
-        robot.arm_ik.forward_kinematics.return_value = (current, current)
-        target_q = np.linspace(0.0, 0.5, 14)
-        robot.arm_ik.solve_ik.return_value = (target_q, np.arange(14))
-        fields = ("x", "y", "z", "r1", "r2", "r3", "r4", "r5", "r6")
-        action = {
-            f"{side}_tcp.{key}": value
-            for side in ("left", "right")
-            for key, value in zip(fields, [0.01, 0.02, 0.03, 0, 1, 0, -1, 0, 0], strict=True)
-        }
-        action["kLeftHipPitch.q"] = 1.0  # Cartesian actions never command legs.
+        for joint in G1_29_JointArmIndex:
+            robot._lowstate.motor_state[joint].q = 0.0
+        action = dict.fromkeys(robot.action_features, 0.0)
+        robot._lowstate_received_at = time.monotonic() - 1
+        with pytest.raises(TimeoutError):
+            robot.send_action(action)
+        robot._lowstate_received_at = time.monotonic()
+        for invalid in ({}, {**action, "kWaistYaw.q": 0.0}, dict.fromkeys(action, float("nan"))):
+            with pytest.raises(ValueError):
+                robot.send_action(invalid)
+        assert robot._arm_target is None
+        mocks["publisher_mock"].Write.assert_not_called()
 
-        assert robot.send_action(action) == action
+    def test_watchdog_passivates_and_latches_fault(self, make_robot):
+        from lerobot.robots.unitree_g1.unitree_g1 import G1_29_LowState
 
-        left, right, seed = robot.arm_ik.solve_ik.call_args.args
-        expected = np.eye(4)
-        expected[:3, 3] = [0.01, 0.02, 0.03]
-        expected[:3, :3] = [[0, -1, 0], [1, 0, 0], [0, 0, 1]]
-        if control_space == "cartesian_rel":
-            expected[:3, 3] += current[:3, 3]
-            expected[:3, :3] = expected[:3, :3] @ current[:3, :3]
-        np.testing.assert_allclose(left, expected)
-        np.testing.assert_allclose(right, expected)
-        np.testing.assert_allclose(seed, measured_q)
-        for i, joint in enumerate(G1_29_JointArmIndex):
-            assert robot.msg.motor_cmd[joint].q == pytest.approx(target_q[i])
-            assert robot.msg.motor_cmd[joint].tau == (i if gravity_compensation else 0.0)
-        assert all(robot.msg.motor_cmd[i].q == -1.0 for i in range(15))
+        factory, mocks = make_robot
+        robot = arm_for_publish(factory(arm_commands_only=True), mocks)
+        robot._lowstate = G1_29_LowState()
+        for joint in G1_29_JointIndex:
+            robot._lowstate.motor_state[joint].q = 0.0
+        robot._lowstate_received_at = time.monotonic()
+        action = dict.fromkeys(robot.action_features, 0.1)
+        robot.send_action(action)
+        robot._arm_target_at -= 1
+        robot._arm_loop()
+        assert isinstance(robot._arm_error, TimeoutError)
+        assert robot._arm_target is None
+        assert all(motor.kp == motor.kd == motor.tau == 0 for motor in robot.msg.motor_cmd[:29])
+        with pytest.raises(RuntimeError, match="publisher failed"):
+            robot.send_action(action)
 
 
 # ---------------------------------------------------------------------------
@@ -850,11 +826,72 @@ class TestRevo2Composition:
         robot.hands[side] = hand
         return hand
 
+    def test_arm_mode_limits_hands_and_requires_complete_actions(self, make_robot):
+        from lerobot.robots.unitree_g1.unitree_g1 import G1_29_LowState
+
+        factory, mocks = make_robot
+        robot = arm_for_publish(factory(arm_commands_only=True), mocks)
+        hand = self.attach_hand(robot)
+        robot._lowstate = G1_29_LowState()
+        for motor in robot._lowstate.motor_state:
+            motor.q = 0.0
+        robot._lowstate_received_at = time.monotonic()
+        action = dict.fromkeys(robot.action_features, 1.0)
+        sent = robot.send_action(action)
+        assert set(sent) == set(action)
+        for key in hand.action_features:
+            assert sent[f"left_hand.{key}"] == pytest.approx(0.204)
+        assert robot._arm_target.keys() == {f"{joint.name}.q" for joint in G1_29_JointArmIndex}
+        hand.send_action.reset_mock()
+        with pytest.raises(ValueError, match="all configured"):
+            robot.send_action(dict.fromkeys(robot._arm_target, 0.1))
+        hand.send_action.assert_not_called()
+
+    def test_failed_hand_validation_cannot_accept_arm_target(self, make_robot):
+        from lerobot.robots.unitree_g1.unitree_g1 import G1_29_LowState
+
+        factory, mocks = make_robot
+        robot = arm_for_publish(factory(arm_commands_only=True), mocks)
+        hand = self.attach_hand(robot)
+        robot._lowstate = G1_29_LowState()
+        for motor in robot._lowstate.motor_state:
+            motor.q = 0.0
+        robot._lowstate_received_at = time.monotonic()
+        hand.prepare_action.side_effect = TimeoutError("stale hand feedback")
+        with pytest.raises(TimeoutError, match="stale hand"):
+            robot.send_action(dict.fromkeys(robot.action_features, 0.5))
+        assert robot._arm_target is None
+        hand.send_action.assert_not_called()
+        mocks["publisher_mock"].Write.assert_not_called()
+
+    def test_slow_hand_dispatch_stops_arm_execution(self, make_robot, monkeypatch):
+        from lerobot.robots.unitree_g1.unitree_g1 import G1_29_LowState
+
+        now = [10.0]
+        monkeypatch.setattr(time, "monotonic", lambda: now[0])
+        factory, mocks = make_robot
+        robot = arm_for_publish(factory(arm_commands_only=True), mocks)
+        hand = self.attach_hand(robot)
+        robot._lowstate = G1_29_LowState()
+        for motor in robot._lowstate.motor_state:
+            motor.q = 0.0
+        robot._lowstate_received_at = now[0]
+
+        def slow_write(action):
+            now[0] += 0.3
+            return action
+
+        hand.send_action.side_effect = slow_write
+        with pytest.raises(TimeoutError):
+            robot.send_action(dict.fromkeys(robot.action_features, 0.5))
+        assert robot._arm_target is None
+        assert isinstance(robot._arm_error, TimeoutError)
+        assert all(motor.kp == motor.kd == motor.tau == 0 for motor in robot.msg.motor_cmd[:29])
+
     @pytest.mark.parametrize("controller", [None, TokenController(), LocomotionOnlyController()])
-    @pytest.mark.parametrize("control_space", ["joint", "cartesian_abs", "cartesian_rel"])
-    def test_features_extend_every_body_space(self, make_robot, controller, control_space):
+    def test_features_extend_every_body_space(self, make_robot, controller):
         factory, _ = make_robot
-        robot = factory(controller=controller, control_space=control_space)
+        robot = factory(controller=controller)
         hand = self.attach_hand(robot)
         assert set(robot.action_features) == set(robot._body_action_features) | {
             f"left_hand.{key}" for key in hand.action_features
@@ -862,10 +899,9 @@ class TestRevo2Composition:
         assert all(f"left_hand.{key}" in robot.observation_features for key in hand.observation_features)
 
     @pytest.mark.parametrize("controller", [None, TokenController(), LocomotionOnlyController()])
-    @pytest.mark.parametrize("control_space", ["joint", "cartesian_abs", "cartesian_rel"])
-    def test_hand_only_action_never_publishes_body(self, make_robot, controller, control_space):
+    def test_hand_only_action_never_publishes_body(self, make_robot, controller):
         factory, mocks = make_robot
-        robot = factory(controller=controller, control_space=control_space)
+        robot = factory(controller=controller)
         hand = self.attach_hand(robot)
         action = {f"left_hand.{key}": 2 for key in hand.action_features}
         assert robot.send_action(action) == dict.fromkeys(action, 1)

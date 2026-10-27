@@ -14,7 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from dataclasses import dataclass
+from typing import Literal
 
 from lerobot.teleoperators.config import TeleoperatorConfig
 
@@ -44,6 +46,9 @@ class BiPico4Config(TeleoperatorConfig):
     """
 
     id: str = "bi_pico4"
+    # Raw tracking is mapped into G1 joint targets by the teleop processor.
+    output_mode: Literal["cartesian", "xr"] = "cartesian"
+    input_timeout_s: float = 0.25
 
     pos_sensitivity: float = 1.0
     ori_sensitivity: float = 1.0
@@ -63,3 +68,9 @@ class BiPico4Config(TeleoperatorConfig):
     grip_disable_threshold: float = 0.3
     orientation_offset_warning_deg: float = 180.0
     position_jump_threshold: float = 0.1
+
+    def __post_init__(self) -> None:
+        if self.output_mode not in ("cartesian", "xr"):
+            raise ValueError("PICO output_mode must be cartesian or xr")
+        if not math.isfinite(self.input_timeout_s) or self.input_timeout_s <= 0:
+            raise ValueError("PICO input timeout must be finite and positive")

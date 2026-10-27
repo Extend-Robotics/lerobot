@@ -412,7 +412,6 @@ torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
 
 [tool.setuptools.package-data]
 lerobot = ["envs/*.json", "annotations/steerable_pipeline/prompts/*.txt", "configs/recipes/*.yaml"]
-"lerobot.teleoperators.pico4" = ["assets/brainco/*.urdf", "assets/brainco/LICENSE", "assets/brainco/*.md"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -572,7 +571,8 @@ ignore_missing_imports = true
 follow_imports = "skip"
 # Paths the hook checks as a whole (pass_filenames: false); keep its `files` pattern in sync.
 files = ["src/lerobot", "scripts", "utils", "conftest.py", "setup.py"]
-exclude = ['_pb2(_grpc)?\.py$']
+# The native PICO SDK is a separate distribution with its own setup module.
+exclude = ['_pb2(_grpc)?\.py$', 'scripts/pico4/sdk/setup\.py$']
 exclude_gitignore = true
 warn_redundant_casts = true
 extra_checks = true

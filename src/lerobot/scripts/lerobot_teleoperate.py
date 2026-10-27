@@ -203,7 +203,7 @@ def teleop_loop(
                 # given that it is the identity processor as default
                 obs = robot.get_observation()
 
-                if robot.name == "unitree_g1":
+                if teleop.name == "unitree_g1":
                     teleop.send_feedback(obs)
 
             with timer.section("teleop"):
@@ -267,12 +267,13 @@ def teleoperate(cfg: TeleoperateConfig):
 
     teleop = make_teleoperator_from_config(cfg.teleop)
     robot = make_robot_from_config(cfg.robot)
-    teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
-
-    teleop.connect()
-    robot.connect()
+    teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors(
+        robot, teleop
+    )
 
     try:
+        teleop.connect()
+        robot.connect()
         teleop_loop(
             teleop=teleop,
             robot=robot,
@@ -290,8 +291,12 @@ def teleoperate(cfg: TeleoperateConfig):
     finally:
         if cfg.display_data:
             shutdown_visualization(cfg.display_mode)
-        teleop.disconnect()
-        robot.disconnect()
+        try:
+            if robot.is_connected:
+                robot.disconnect()
+        finally:
+            if teleop.is_connected:
+                teleop.disconnect()
 
 
 def main():

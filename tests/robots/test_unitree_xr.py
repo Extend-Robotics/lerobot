@@ -1,21 +1,15 @@
 """Upstream XR mapping and motor-control behavior, without headset or robot writes."""
 
 import json
-import threading
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import Mock
 
 import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
 from lerobot.robots.unitree_g1.g1_kinematics import G1_29_ArmIK, WeightedMovingFilter
-from lerobot.robots.unitree_g1.pico_teleop import ARM_KEYS
-from lerobot.robots.unitree_g1.unitree_xr import (
+from lerobot.teleoperators.bi_pico4.xr_mapping import (
     ROBOT_FROM_XR,
-    UnitreeXrArmSession,
-    clip_arm_target,
     map_xr_wrist_targets,
 )
 
@@ -89,96 +83,3 @@ def test_native_ik_filter_and_gravity_match_pinned_upstream_sequence():
         assert ik.last_solve_success
         np.testing.assert_allclose(q, frame["q"], atol=1e-5, rtol=0)
         np.testing.assert_allclose(tau, frame["tau"], atol=5e-5, rtol=0)
-
-
-def test_upstream_clipping_is_relative_to_measured_joints_and_scales_both_arms():
-    measured = np.full(14, 0.2)
-    target = measured.copy()
-    target[0] += 1.0
-    target[7] += 0.5
-    command = clip_arm_target(target, measured)
-    assert command[0] == pytest.approx(0.32)
-    assert command[7] == pytest.approx(0.26)
-
-
-@pytest.fixture
-def session_state():
-    now = [1.0]
-    robot = Mock()
-    robot.config = SimpleNamespace(read_only=False, arm_commands_only=True, arm_ik_profile="unitree_xr")
-    robot.control_space = "cartesian_abs"
-    robot.controller = None
-    robot.get_observation.return_value = dict.fromkeys(ARM_KEYS, 0.0)
-    solver = robot.arm_ik
-    solver.last_solve_success = True
-    solver.solve_ik.return_value = (np.full(14, 0.5), np.arange(14, dtype=float))
-    solver.forward_kinematics.return_value = (np.eye(4), np.eye(4))
-    teleop = Mock()
-    teleop.get_xr_sample.return_value = (10, sample_poses())
-    session = UnitreeXrArmSession(robot, teleop, clock=lambda: now[0])
-    session.initialize()
-    return SimpleNamespace(session=session, robot=robot, teleop=teleop, solver=solver, now=now)
-
-
-def test_explicit_start_full_ik_and_feedforward_publication(session_state):
-    state = session_state
-    assert state.session.publish_once() is None
-    state.robot.send_arm_joint_action.assert_not_called()
-    state.session.start()
-    state.session.tick()
-    state.solver.solve_ik.assert_called_once()
-    assert state.solver.solve_ik.call_args.kwargs == {}  # Upstream filter is enabled.
-    first = state.session.publish_once()
-    second = state.session.publish_once()
-    np.testing.assert_allclose(first, np.full(14, 0.12))
-    np.testing.assert_array_equal(first, second)  # Unchanged measured state; no command accumulation.
-    np.testing.assert_array_equal(
-        state.robot.send_arm_joint_action.call_args.kwargs["arm_tau"], np.arange(14)
-    )
-
-
-def test_preview_uses_virtual_feedback_and_never_sends_commands(session_state):
-    state = session_state
-    state.robot.config.read_only = True
-    state.session.start()
-    assert state.session.tick()["status"] == "preview"
-    state.session.publish_once()
-    state.session.tick()
-    np.testing.assert_allclose(state.solver.solve_ik.call_args.args[2], np.full(14, 0.5))
-    state.robot.send_arm_joint_action.assert_not_called()
-
-
-def test_expired_targets_cannot_be_published(session_state):
-    state = session_state
-    state.session.start()
-    state.session.tick()
-    state.now[0] += 0.3
-    with pytest.raises(TimeoutError):
-        state.session.publish_once()
-    state.robot.send_arm_joint_action.assert_not_called()
-
-
-def test_bad_ik_cannot_replace_motor_targets(session_state):
-    state = session_state
-    state.session.start()
-    state.solver.solve_ik.return_value = (np.full(14, np.nan), np.zeros(14))
-    with pytest.raises(ValueError, match="IK failed"):
-        state.session.tick()
-    state.robot.send_arm_joint_action.assert_not_called()
-
-
-def test_publisher_runs_independently_and_stops_before_disconnect(session_state):
-    state = session_state
-    state.session.start()
-    state.session.tick()
-    published = threading.Event()
-    state.robot.send_arm_joint_action.side_effect = lambda *args, **kwargs: published.set()
-    try:
-        state.session.start_publisher()
-        assert published.wait(1.0)
-    finally:
-        state.session.close()
-    assert not state.session._thread.is_alive()
-    count = state.robot.send_arm_joint_action.call_count
-    assert state.session.publish_once() is None
-    assert state.robot.send_arm_joint_action.call_count == count
