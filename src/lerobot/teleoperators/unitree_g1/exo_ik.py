@@ -353,7 +353,7 @@ class ExoskeletonIKHelper:
             self.q_g1[i] = frozen_vals[n]
 
         return {
-            f"{j.name}.pos": float(self.q_g1[i])
+            f"{j.name}.q": float(self.q_g1[i])
             for i, j in enumerate(G1_29_JointArmIndex)
             if i < len(self.q_g1)
         }

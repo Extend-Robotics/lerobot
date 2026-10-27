@@ -58,7 +58,7 @@ def main() -> None:
         robot._send_zero_torque = lambda: None
     try:
         robot.connect()
-        elbow_keys = ("kLeftElbow.pos", "kRightElbow.pos")
+        elbow_keys = ("kLeftElbow.q", "kRightElbow.q")
         initial = robot.get_observation()
         starting_elbows = {key: initial[key] for key in elbow_keys}
         if not all(math.isfinite(value) for value in starting_elbows.values()):

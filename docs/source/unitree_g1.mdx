@@ -471,7 +471,7 @@ retain neutral names because the upstream motor enums and retargeting labels
 conflict. Override `motor_names` only after verifying the installed driver's
 ordering. G1 prefixes these names with `left_hand.` or `right_hand.`.
 
-Position values are normalized `[0, 1]` (open to closed), unlike body `.pos` values
+Position values are normalized `[0, 1]` (open to closed), unlike body `.q` values
 in radians. Observations contain measured positions. Commands require all six
 positions for each addressed hand, reject nonfinite values, clip to `[0, 1]`, and
 return the clipped action. In whole-body mode, omitted hands receive no command

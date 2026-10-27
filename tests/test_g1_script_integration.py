@@ -106,7 +106,7 @@ def test_rollout_keeps_g1_joint_state_actions_and_order(monkeypatch):
             return {**self.action_features, "kLeftElbow.dq": float, "kLeftElbow.tau": float}
 
         def get_observation(self):
-            return {**dict.fromkeys(self.observation_features, 0.0), "kLeftHipPitch.pos": 0.0}
+            return {**dict.fromkeys(self.observation_features, 0.0), "kLeftHipPitch.q": 0.0}
 
     cfg = RolloutConfig(
         robot=MockRobotConfig(),

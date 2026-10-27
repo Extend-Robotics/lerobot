@@ -183,7 +183,7 @@ class EpisodicStrategy(RolloutStrategy):
                                 current_pos = {
                                     k: v
                                     for k, v in obs.items()
-                                    if k in robot.action_features and k.endswith(".pos")
+                                    if k in robot.action_features and k.endswith((".pos", ".q"))
                                 }
                                 if (
                                     teleop_supports_feedback(teleop)

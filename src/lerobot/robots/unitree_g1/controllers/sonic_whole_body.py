@@ -164,7 +164,7 @@ class SonicWholeBodyController(RobotController):
             lowstate: Unitree lowstate carrying joint positions/velocities and IMU state.
 
         Returns:
-            Absolute joint targets keyed ``<joint>.pos`` for all 29 joints: ``default_angles``
+            Absolute joint targets keyed ``<joint>.q`` for all 29 joints: ``default_angles``
             plus the decoder's residual, scaled by ``action_scale``.
         """
         # Token: reassemble the dense 64-D latent from motion_token.{i}.pos (all keys required);
@@ -215,4 +215,4 @@ class SonicWholeBodyController(RobotController):
         )
         self.last_action_mj = action_mj.copy()
         target = self.default_angles + action_mj[ISAACLAB_TO_MUJOCO] * self.action_scale
-        return {f"{m.name}.pos": float(target[m.value]) for m in G1_29_JointIndex}
+        return {f"{m.name}.q": float(target[m.value]) for m in G1_29_JointIndex}

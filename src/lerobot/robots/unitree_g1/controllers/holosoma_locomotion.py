@@ -215,6 +215,6 @@ class HolosomaLocomotionController(RobotController):
         action_dict = {}
         for i in range(15):
             motor_name = G1_29_JointIndex(i).name
-            action_dict[f"{motor_name}.pos"] = float(target[i])
+            action_dict[f"{motor_name}.q"] = float(target[i])
 
         return action_dict
