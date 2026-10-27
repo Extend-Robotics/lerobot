@@ -30,7 +30,7 @@ Run on the robot or a machine with DDS connectivity to it:
 uv run --no-sync python examples/unitree_g1d/read_state.py --network-interface eth0 --duration 10
 ```
 
-Replace `eth0` with the robot-facing interface. Positions use radians (`.q`) and
+Replace `eth0` with the robot-facing interface. Positions use radians (`.pos`) and
 velocities use radians/second (`.dq`), with the same joint names as LeRobot's G1.
 The default schema covers 14 arm joints (slots 15–28). `--include-waist` also reads
 waist yaw/pitch from slots 12/14; verify that your firmware supplies these fields.

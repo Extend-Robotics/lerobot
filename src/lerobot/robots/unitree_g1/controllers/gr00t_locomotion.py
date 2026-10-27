@@ -207,6 +207,6 @@ class GrootLocomotionController(RobotController):
         action_dict = {}
         for i in range(15):
             motor_name = G1_29_JointIndex(i).name
-            action_dict[f"{motor_name}.q"] = float(target_dof_pos_15[i])
+            action_dict[f"{motor_name}.pos"] = float(target_dof_pos_15[i])
 
         return action_dict

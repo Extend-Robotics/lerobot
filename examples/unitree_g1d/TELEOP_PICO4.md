@@ -62,7 +62,7 @@ PICO is used only for human input/corrections; policy output bypasses XR mapping
 and IK. Configure cameras in `robot.cameras` when collecting visual observations.
 This repository's collection command is `lerobot-record`.
 
-Arm-only mode advertises exactly 14 arm `.q` features and any configured hand
+Arm-only mode advertises exactly 14 arm `.pos` features and any configured hand
 `.pos` features. The raw observation still contains diagnostic body/velocity/IMU
 values, but these are not part of the arm-only policy state. Recording and
 rollout retain the joint targets returned by `send_action()`, after command limits.

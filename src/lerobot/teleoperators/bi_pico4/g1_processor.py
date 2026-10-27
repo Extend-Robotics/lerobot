@@ -14,7 +14,7 @@ from lerobot.robots.unitree_g1.g1_utils import G1_29_JointArmIndex
 
 from .xr_mapping import map_xr_wrist_targets
 
-ARM_KEYS = tuple(f"{joint.name}.q" for joint in G1_29_JointArmIndex)
+ARM_KEYS = tuple(f"{joint.name}.pos" for joint in G1_29_JointArmIndex)
 POSE_FIELDS = ("x", "y", "z", "qx", "qy", "qz", "qw")
 
 

@@ -20,7 +20,7 @@ def test_launcher_preview_and_explicit_start(monkeypatch, execute, response, exp
     now = [0.0]
     robot = Mock()
     teleop = Mock(is_connected=True)
-    processor = Mock(return_value={"kLeftElbow.q": 0.2})
+    processor = Mock(return_value={"kLeftElbow.pos": 0.2})
     robot.send_action.side_effect = lambda action: action
     monkeypatch.setattr(teleop_pico4, "UnitreeG1", Mock(return_value=robot))
     monkeypatch.setattr(teleop_pico4, "BiPico4", Mock(return_value=teleop))

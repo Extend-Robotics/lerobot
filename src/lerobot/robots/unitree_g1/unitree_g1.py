@@ -77,7 +77,7 @@ class RobotController(Protocol):
 
     Each tick the robot hands the controller the latest lowstate plus a snapshot of the
     incoming action, and publishes the absolute joint targets it returns, keyed
-    ``<joint>.q``. It lives here rather than in ``controllers/`` so that importing the
+    ``<joint>.pos``. It lives here rather than in ``controllers/`` so that importing the
     robot does not pull in the controller implementations and their onnxruntime dependency.
 
     Controllers may also expose any of the following, which the robot picks up when present:
@@ -93,7 +93,7 @@ class RobotController(Protocol):
     """Control period in seconds; sets the rate of the robot's controller thread."""
 
     def run_step(self, action: dict, lowstate) -> dict:
-        """Map one lowstate plus action into absolute joint targets keyed ``<joint>.q``."""
+        """Map one lowstate plus action into absolute joint targets keyed ``<joint>.pos``."""
         ...
 
     def reset(self) -> None:
@@ -293,7 +293,7 @@ class UnitreeG1(Robot):
                     if not np.isfinite(cmd.q):
                         cmd.q = 0.0
                     continue
-                key = f"{motor.name}.q"
+                key = f"{motor.name}.pos"
                 if key in action:
                     self.msg.motor_cmd[motor.value].q = action[key]
                     self.msg.motor_cmd[motor.value].qd = 0
@@ -343,11 +343,11 @@ class UnitreeG1(Robot):
     @property
     def _body_action_features(self) -> dict[str, type]:
         if self.config.arm_commands_only:
-            return {f"{joint.name}.q": float for joint in G1_29_JointArmIndex}
+            return {f"{joint.name}.pos": float for joint in G1_29_JointArmIndex}
 
         # No controller configured at all: raw 29-DoF joint teleop.
         if self.controller is None:
-            return {f"{G1_29_JointIndex(motor).name}.q": float for motor in G1_29_JointIndex}
+            return {f"{G1_29_JointIndex(motor).name}.pos": float for motor in G1_29_JointIndex}
 
         # Whole-body controllers (SONIC): 64-D latent token.
         controller_ft = getattr(self.controller, "action_ft", None)
@@ -357,7 +357,7 @@ class UnitreeG1(Robot):
         # Locomotion controllers (GR00T / Holosoma): arm joint targets + joystick axes.
         # TODO: have GR00T/Holosoma advertise their own action_features too, so every
         # controller declares its action space and this fallthrough can be dropped.
-        arm_features = {f"{G1_29_JointArmIndex(motor).name}.q": float for motor in G1_29_JointArmIndex}
+        arm_features = {f"{G1_29_JointArmIndex(motor).name}.pos": float for motor in G1_29_JointArmIndex}
         remote_features = dict.fromkeys(REMOTE_AXES, float)
         return {**arm_features, **remote_features}
 
@@ -520,7 +520,7 @@ class UnitreeG1(Robot):
             if lowstate is None:
                 return
             action = {
-                f"{motor.name}.q": (
+                f"{motor.name}.pos": (
                     float(lowstate.motor_state[motor.value].q)
                     if np.isfinite(lowstate.motor_state[motor.value].q)
                     else 0.0
@@ -609,7 +609,7 @@ class UnitreeG1(Robot):
         for motor in G1_29_JointIndex:
             name = motor.name
             idx = motor.value
-            obs[f"{name}.q"] = lowstate.motor_state[idx].q
+            obs[f"{name}.pos"] = lowstate.motor_state[idx].q
             obs[f"{name}.dq"] = lowstate.motor_state[idx].dq
             obs[f"{name}.tau"] = lowstate.motor_state[idx].tau_est
 
@@ -747,7 +747,7 @@ class UnitreeG1(Robot):
                 raise ValueError("Expected all configured arm and hand joint targets")
             if not all(np.isfinite(value) for value in action.values()):
                 raise ValueError("Joint targets must be finite")
-            keys = [f"{joint.name}.q" for joint in G1_29_JointArmIndex]
+            keys = [f"{joint.name}.pos" for joint in G1_29_JointArmIndex]
             requested = np.array([action[key] for key in keys], dtype=float)
             delta = requested - measured
             scale = max(1.0, float(np.max(np.abs(delta))) / self.config.arm_max_step)
@@ -803,7 +803,7 @@ class UnitreeG1(Robot):
             action_to_publish = {
                 key: value
                 for key, value in action.items()
-                if key.endswith(".q") and key.startswith(arm_prefixes)
+                if key.endswith(".pos") and key.startswith(arm_prefixes)
             }
             if not action_to_publish:
                 # Nothing here for the arms, so publishing would only re-send the controller
@@ -816,7 +816,7 @@ class UnitreeG1(Robot):
             tau = np.zeros(29, dtype=np.float32)
             action_np = np.array(
                 [
-                    action_to_publish.get(f"{joint.name}.q", self.msg.motor_cmd[joint.value].q)
+                    action_to_publish.get(f"{joint.name}.pos", self.msg.motor_cmd[joint.value].q)
                     for joint in G1_29_JointArmIndex
                 ],
                 dtype=np.float32,
@@ -852,7 +852,7 @@ class UnitreeG1(Robot):
     def _motors_ft(self) -> dict[str, type]:
         """Joint positions for all 29 joints."""
         joints = G1_29_JointArmIndex if self.config.arm_commands_only else G1_29_JointIndex
-        return {f"{joint.name}.q": float for joint in joints}
+        return {f"{joint.name}.pos": float for joint in joints}
 
     @property
     def cameras(self) -> dict:
@@ -880,7 +880,7 @@ class UnitreeG1(Robot):
             if self.config.is_simulation and self.sim_env is not None:
                 self.sim_env.reset()
                 self.publish_lowcmd(
-                    {f"{motor.name}.q": float(default_positions[motor.value]) for motor in G1_29_JointIndex}
+                    {f"{motor.name}.pos": float(default_positions[motor.value]) for motor in G1_29_JointIndex}
                 )
             else:
                 total_time = 3.0
@@ -892,7 +892,7 @@ class UnitreeG1(Robot):
                 # record current positions
                 init_dof_pos: np.ndarray = np.zeros(NUM_MOTORS, dtype=np.float32)
                 for motor in G1_29_JointIndex:
-                    init_dof_pos[motor.value] = obs[f"{motor.name}.q"]
+                    init_dof_pos[motor.value] = obs[f"{motor.name}.pos"]
 
                 # Interpolate to default position
                 for step in range(num_steps):
@@ -903,7 +903,7 @@ class UnitreeG1(Robot):
                     for motor in G1_29_JointIndex:
                         target_pos = default_positions[motor.value]
                         interp_pos = init_dof_pos[motor.value] * (1 - alpha) + target_pos * alpha
-                        action_dict[f"{motor.name}.q"] = float(interp_pos)
+                        action_dict[f"{motor.name}.pos"] = float(interp_pos)
 
                     self.publish_lowcmd(action_dict)
 

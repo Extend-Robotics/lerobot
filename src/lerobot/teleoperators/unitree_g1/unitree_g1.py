@@ -212,7 +212,7 @@ class UnitreeG1Teleoperator(Teleoperator):
         remote_features: dict[str, type] = dict.fromkeys(self.remote_controller.remote_action, float)
         if not self._arm_control_enabled:
             return remote_features
-        joint_features = {f"{name}.q": float for name in self._g1_arm_joint_names}
+        joint_features = {f"{name}.pos": float for name in self._g1_arm_joint_names}
         return {**joint_features, **remote_features}
 
     @cached_property

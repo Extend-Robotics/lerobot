@@ -34,7 +34,7 @@ def main() -> None:
         start = time.monotonic()
         while time.monotonic() - start < args.duration:
             observation = robot.get_observation()
-            q = np.array([observation[f"{joint.name}.q"] for joint in G1_29_JointArmIndex])
+            q = np.array([observation[f"{joint.name}.pos"] for joint in G1_29_JointArmIndex])
             poses = model.forward_kinematics(q)
             print(
                 json.dumps({side: pose.tolist() for side, pose in zip(("left", "right"), poses, strict=True)})

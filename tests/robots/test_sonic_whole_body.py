@@ -342,12 +342,12 @@ class TestJointTargets:
 
         expected = DEFAULT_ANGLES + action[ISAACLAB_TO_MUJOCO] * ACTION_SCALE
         for joint in G1_29_JointIndex:
-            assert targets[f"{joint.name}.q"] == pytest.approx(expected[joint.value], abs=1e-6)
+            assert targets[f"{joint.name}.pos"] == pytest.approx(expected[joint.value], abs=1e-6)
 
     def test_returns_one_key_per_joint(self, make_controller):
         controller, _ = make_controller()
         targets = controller.run_step({}, make_lowstate())
-        assert set(targets) == {f"{joint.name}.q" for joint in G1_29_JointIndex}
+        assert set(targets) == {f"{joint.name}.pos" for joint in G1_29_JointIndex}
         assert len(targets) == NUM_MOTORS
 
     def test_targets_are_plain_floats(self, make_controller):
@@ -360,7 +360,7 @@ class TestJointTargets:
         controller, _ = make_controller(action=np.zeros(NUM_MOTORS, np.float32))
         targets = controller.run_step({}, make_lowstate())
         for joint in G1_29_JointIndex:
-            assert targets[f"{joint.name}.q"] == pytest.approx(DEFAULT_ANGLES[joint.value], abs=1e-6)
+            assert targets[f"{joint.name}.pos"] == pytest.approx(DEFAULT_ANGLES[joint.value], abs=1e-6)
 
     def test_residual_is_reordered(self, make_controller):
         """A non-identity permutation must actually be applied to the decoder output."""
@@ -368,7 +368,7 @@ class TestJointTargets:
         controller, _ = make_controller(action=action)
         targets = controller.run_step({}, make_lowstate())
 
-        produced = np.array([targets[f"{j.name}.q"] for j in G1_29_JointIndex], dtype=np.float32)
+        produced = np.array([targets[f"{j.name}.pos"] for j in G1_29_JointIndex], dtype=np.float32)
         unpermuted = DEFAULT_ANGLES + action * ACTION_SCALE
         assert not np.allclose(produced, unpermuted)
 

@@ -377,16 +377,32 @@ def build_rollout_context(
         cfg = copy(cfg)
         cfg.use_torch_compile = False
 
-    # --- 2. Adapters and robot-side processors ---------------------
+    # --- 3. Hardware (heaviest side-effect, deferred) -----------------
     robot_config = cfg.robot
     if robot_config is None:
         raise ValueError("--robot.type is required for rollout")
+    logger.info("Connecting robot (%s)...", robot_config.type)
     robot = make_robot_from_config(robot_config)
+    robot.connect()
+    logger.info("Robot connected: %s", robot.name)
+
+    # Capture only controllable positions; raw observations can include passive joints.
+    initial_obs = robot.get_observation()
+    initial_position = {
+        k: v for k, v in initial_obs.items() if k in robot.action_features and k.endswith(".pos")
+    }
+    logger.info("Captured initial robot position (%d keys)", len(initial_position))
+
+    robot_wrapper = ThreadSafeRobot(robot)
+
     teleop = None
     if cfg.teleop is not None:
+        logger.info("Connecting teleoperator (%s)...", cfg.teleop.type)
         teleop = make_teleoperator_from_config(cfg.teleop)
+        teleop.connect()
+        logger.info("Teleoperator connected")
 
-    # Construct optional IK before opening hardware connections.
+    # --- 2. Robot-side processors (user-supplied or defaults) --------
     if (
         teleop_action_processor is None
         or robot_action_processor is None
@@ -396,27 +412,6 @@ def build_rollout_context(
         teleop_action_processor = teleop_action_processor or _t
         robot_action_processor = robot_action_processor or _r
         robot_observation_processor = robot_observation_processor or _o
-
-    # --- 3. Hardware ----------------------------------------------
-    try:
-        logger.info("Connecting robot (%s)...", robot_config.type)
-        robot.connect()
-        if teleop is not None:
-            teleop.connect()
-    except BaseException:
-        try:
-            robot.disconnect()
-        finally:
-            if teleop is not None and teleop.is_connected:
-                teleop.disconnect()
-        raise
-
-    initial_obs = robot.get_observation()
-    initial_position = {
-        k: v for k, v in initial_obs.items() if k in robot.action_features and k.endswith((".pos", ".q"))
-    }
-    logger.info("Captured initial robot position (%d keys)", len(initial_position))
-    robot_wrapper = ThreadSafeRobot(robot)
 
     # TODO(Steven): once Teleoperator motor-control methods are standardised
     # (``enable_torque`` / ``disable_torque`` / ``write_goal_positions``), gate
@@ -435,14 +430,14 @@ def build_rollout_context(
     #         )
 
     # --- 4. Features + action-key reconciliation ---------------------
-    # Position features use .pos (most robots) or .q (G1, in radians).
-    # Keep base .vel channels too; measured joint velocities/torques remain
-    # available in raw observations but are not policy state.
+    # TODO(Steven):Only ``.pos`` joint features are routed to the policy as state and as the
+    # action target; velocity and torque channels (when present) are kept in
+    # the raw observation but excluded from the policy-facing tensors.
     all_obs_features = robot.observation_features
     # ``observation_features`` values are either a tuple (camera shape) or the
     # ``float`` type itself used as a sentinel for scalar motor features —
     # see ``dict[str, type | tuple]`` annotation on ``Robot.observation_features``.
-    # Keep cameras (tuple) plus joint-position (.pos/.q) and base-velocity (.vel)
+    # Keep cameras (tuple) plus both joint-position (.pos) and base-velocity (.vel)
     # scalar state features. LeKiwi's observation.state is 9-dim (6 arm .pos +
     # x/y/theta.vel) and the policy was trained/normalized on all 9; the old .pos-only
     # filter fed a 6-dim state into a 9-dim normalizer → RuntimeError (size 6 vs 9).
@@ -450,20 +445,20 @@ def build_rollout_context(
     observation_features_hw: dict[str, type | tuple] = {
         k: v
         for k, v in all_obs_features.items()
-        if isinstance(v, tuple) or (v is float and k.endswith((".pos", ".q", ".vel")))
+        if isinstance(v, tuple) or (v is float and k.endswith((".pos", ".vel")))
     }
     policy_action_names = getattr(policy_config, "action_feature_names", None)
     checkpoint_order = list(policy_action_names) if policy_action_names else None
     observation_features_hw = _align_to_checkpoint_order(
         observation_features_hw, checkpoint_order, what="state"
     )
-    # Keep joint-position (.pos/.q) and base-velocity (.vel) action features so
+    # Keep both joint-position (.pos) and base-velocity (.vel) action features so
     # mobile manipulators command the base too (e.g. LeKiwi: 6 arm .pos +
     # x/y/theta.vel = 9-dim action). Pure-arm robots have no .vel keys, so this is
     # a no-op for them. Without the .vel keys the base velocities are silently
     # dropped from dataset_features[ACTION]/ordered_action_keys and the base never moves.
     action_features_hw = {
-        k: v for k, v in robot.action_features.items() if k.endswith((".pos", ".q", ".vel"))
+        k: v for k, v in robot.action_features.items() if k.endswith((".pos", ".vel"))
     }
     action_features_hw = _align_to_checkpoint_order(action_features_hw, checkpoint_order, what="action")
 

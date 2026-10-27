@@ -271,9 +271,10 @@ def teleoperate(cfg: TeleoperateConfig):
         robot, teleop
     )
 
+    teleop.connect()
+    robot.connect()
+
     try:
-        teleop.connect()
-        robot.connect()
         teleop_loop(
             teleop=teleop,
             robot=robot,
@@ -291,12 +292,8 @@ def teleoperate(cfg: TeleoperateConfig):
     finally:
         if cfg.display_data:
             shutdown_visualization(cfg.display_mode)
-        try:
-            if robot.is_connected:
-                robot.disconnect()
-        finally:
-            if teleop.is_connected:
-                teleop.disconnect()
+        teleop.disconnect()
+        robot.disconnect()
 
 
 def main():

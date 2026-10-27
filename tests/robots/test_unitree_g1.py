@@ -279,7 +279,7 @@ class TestObservationFeatures:
         factory, _ = make_robot
         features = factory().observation_features
         assert len(features) == NUM_MOTORS
-        assert set(features) == {f"{joint.name}.q" for joint in G1_29_JointIndex}
+        assert set(features) == {f"{joint.name}.pos" for joint in G1_29_JointIndex}
 
     def test_whole_body_replaces_state(self, make_robot):
         """Regression: merging the 29 joint keys with the 64-D token gave a 93-D state and
@@ -290,13 +290,13 @@ class TestObservationFeatures:
 
         assert len(features) == TOKEN_DIM
         assert set(features) == set(controller.observation_ft)
-        assert not [key for key in features if key.endswith(".q")]
+        assert not set(features).intersection(f"{joint.name}.pos" for joint in G1_29_JointIndex)
 
     def test_locomotion_keeps_joint_state(self, make_robot):
         """Controllers that declare no proprio features must not lose the joint keys."""
         factory, _ = make_robot
         features = factory(controller=LocomotionOnlyController()).observation_features
-        assert set(features) == {f"{joint.name}.q" for joint in G1_29_JointIndex}
+        assert set(features) == {f"{joint.name}.pos" for joint in G1_29_JointIndex}
 
     def test_cameras_are_added_alongside_state(self, make_robot):
         factory, _ = make_robot
@@ -319,7 +319,7 @@ class TestActionFeatures:
     def test_no_controller_is_full_joint_teleop(self, make_robot):
         factory, _ = make_robot
         features = factory().action_features
-        assert set(features) == {f"{joint.name}.q" for joint in G1_29_JointIndex}
+        assert set(features) == {f"{joint.name}.pos" for joint in G1_29_JointIndex}
 
     def test_whole_body_owns_action_space(self, make_robot):
         factory, _ = make_robot
@@ -333,7 +333,7 @@ class TestActionFeatures:
         factory, _ = make_robot
         features = factory(controller=LocomotionOnlyController()).action_features
 
-        expected = {f"{joint.name}.q" for joint in G1_29_JointArmIndex} | set(REMOTE_AXES)
+        expected = {f"{joint.name}.pos" for joint in G1_29_JointArmIndex} | set(REMOTE_AXES)
         assert set(features) == expected
         assert len(features) == len(G1_29_JointArmIndex) + len(REMOTE_AXES)
 
@@ -354,7 +354,7 @@ class TestPublishLowcmd:
         factory, mocks = make_robot
         robot = arm_for_publish(factory(), mocks)
 
-        robot.publish_lowcmd({f"{G1_29_JointIndex.kLeftKnee.name}.q": 0.42})
+        robot.publish_lowcmd({f"{G1_29_JointIndex.kLeftKnee.name}.pos": 0.42})
 
         assert robot.msg.motor_cmd[G1_29_JointIndex.kLeftKnee.value].q == pytest.approx(0.42)
         assert robot.msg.motor_cmd[G1_29_JointIndex.kRightKnee.value].q == pytest.approx(-1.0)
@@ -363,7 +363,7 @@ class TestPublishLowcmd:
         factory, mocks = make_robot
         robot = arm_for_publish(factory(), mocks, kp_value=77.0, kd_value=3.0)
 
-        robot.publish_lowcmd({f"{G1_29_JointIndex.kWaistYaw.name}.q": 0.0})
+        robot.publish_lowcmd({f"{G1_29_JointIndex.kWaistYaw.name}.pos": 0.0})
 
         cmd = robot.msg.motor_cmd[G1_29_JointIndex.kWaistYaw.value]
         assert cmd.kp == pytest.approx(77.0)
@@ -376,7 +376,7 @@ class TestPublishLowcmd:
 
         override_kp = np.full(NUM_MOTORS, 10.0, np.float32)
         override_kd = np.full(NUM_MOTORS, 0.5, np.float32)
-        robot.publish_lowcmd({f"{G1_29_JointIndex.kWaistYaw.name}.q": 0.0}, kp=override_kp, kd=override_kd)
+        robot.publish_lowcmd({f"{G1_29_JointIndex.kWaistYaw.name}.pos": 0.0}, kp=override_kp, kd=override_kd)
 
         cmd = robot.msg.motor_cmd[G1_29_JointIndex.kWaistYaw.value]
         assert cmd.kp == pytest.approx(10.0)
@@ -416,11 +416,11 @@ class TestPublishLowcmd:
         )
 
         def publish_parked():
-            robot.publish_lowcmd(ParkedAction({f"{knee.name}.q": 1.0 for knee in knees}))
+            robot.publish_lowcmd(ParkedAction({f"{knee.name}.pos": 1.0 for knee in knees}))
 
         def publish_other():
             first_joint_written.wait(timeout=1.0)
-            robot.publish_lowcmd({f"{knee.name}.q": 2.0 for knee in knees})
+            robot.publish_lowcmd({f"{knee.name}.pos": 2.0 for knee in knees})
             other_publish_done.set()
 
         threads = [threading.Thread(target=publish_parked), threading.Thread(target=publish_other)]
@@ -439,7 +439,7 @@ class TestPublishLowcmd:
         robot = arm_for_publish(factory(), mocks)
 
         zeros = np.zeros(NUM_MOTORS, np.float32)
-        action = {f"{joint.name}.q": 0.0 for joint in G1_29_JointIndex}
+        action = {f"{joint.name}.pos": 0.0 for joint in G1_29_JointIndex}
         robot.publish_lowcmd(action, kp=zeros, kd=zeros, tau=zeros)
 
         for joint in G1_29_JointIndex:
@@ -452,7 +452,7 @@ class TestPublishLowcmd:
         factory, mocks = make_robot
         robot = arm_for_publish(factory(), mocks)
 
-        robot.publish_lowcmd({f"{G1_29_JointIndex.kLeftElbow.name}.q": 0.1})
+        robot.publish_lowcmd({f"{G1_29_JointIndex.kLeftElbow.name}.pos": 0.1})
 
         assert robot.msg.motor_cmd[G1_29_JointIndex.kLeftElbow.value].tau == pytest.approx(0.0)
 
@@ -462,7 +462,7 @@ class TestPublishLowcmd:
         mocks["publisher_mock"].Write.reset_mock()
         mocks["crc_mock"].Crc.reset_mock()
 
-        robot.publish_lowcmd({f"{G1_29_JointIndex.kLeftKnee.name}.q": 0.0})
+        robot.publish_lowcmd({f"{G1_29_JointIndex.kLeftKnee.name}.pos": 0.0})
 
         mocks["crc_mock"].Crc.assert_called_once_with(robot.msg)
         mocks["publisher_mock"].Write.assert_called_once_with(robot.msg)
@@ -514,7 +514,7 @@ class TestSendAction:
         shoulder = G1_29_JointArmIndex.kLeftShoulderPitch
         mocks["publisher_mock"].Write.reset_mock()
 
-        robot.send_action({f"{shoulder.name}.q": 0.3, "motion_token.0.pos": 0.5})
+        robot.send_action({f"{shoulder.name}.pos": 0.3, "motion_token.0.pos": 0.5})
 
         mocks["publisher_mock"].Write.assert_called_once_with(robot.msg)
         assert robot.msg.motor_cmd[shoulder.value].q == pytest.approx(0.3)
@@ -525,7 +525,7 @@ class TestSendAction:
         robot = arm_for_publish(factory(), mocks)
         mocks["publisher_mock"].Write.reset_mock()
 
-        robot.send_action({f"{motor.name}.q": 0.2 for motor in G1_29_JointIndex})
+        robot.send_action({f"{motor.name}.pos": 0.2 for motor in G1_29_JointIndex})
 
         mocks["publisher_mock"].Write.assert_called_once_with(robot.msg)
         assert all(q == pytest.approx(0.2) for q in published_targets(robot).values())
@@ -566,7 +566,7 @@ class TestArmJointControl:
         robot.connect()
         mocks["publisher_mock"].Init.assert_not_called()
         with pytest.raises(PermissionError):
-            robot.publish_lowcmd({"kLeftElbow.q": 0.1})
+            robot.publish_lowcmd({"kLeftElbow.pos": 0.1})
         robot._send_zero_torque()
         robot.disconnect()
         mocks["publisher_mock"].Write.assert_not_called()
@@ -574,7 +574,7 @@ class TestArmJointControl:
     def test_features_are_only_controllable_joint_positions(self, make_robot):
         factory, _ = make_robot
         robot = factory(arm_commands_only=True)
-        assert set(robot.action_features) == {f"{joint.name}.q" for joint in G1_29_JointArmIndex}
+        assert set(robot.action_features) == {f"{joint.name}.pos" for joint in G1_29_JointArmIndex}
         assert robot.observation_features == robot.action_features
 
     def test_accepted_target_is_bounded_and_publisher_repeats_it(self, make_robot):
@@ -587,14 +587,14 @@ class TestArmJointControl:
             robot._lowstate.motor_state[joint].q = 0.0
         robot._lowstate_received_at = time.monotonic()
         action = dict.fromkeys(robot.action_features, 1.0)
-        action["kRightShoulderPitch.q"] = 0.5
+        action["kRightShoulderPitch.pos"] = 0.5
         sent = robot.send_action(action)
-        assert sent["kLeftShoulderPitch.q"] == pytest.approx(0.12)
-        assert sent["kRightShoulderPitch.q"] == pytest.approx(0.06)
+        assert sent["kLeftShoulderPitch.pos"] == pytest.approx(0.12)
+        assert sent["kRightShoulderPitch.pos"] == pytest.approx(0.06)
         for _ in range(2):
             robot._publish_arm_target()
             for joint in G1_29_JointArmIndex:
-                assert robot.msg.motor_cmd[joint].q == sent[f"{joint.name}.q"]
+                assert robot.msg.motor_cmd[joint].q == sent[f"{joint.name}.pos"]
         assert all(motor.kp == motor.kd == 0 for motor in robot.msg.motor_cmd[:12])
 
     def test_stale_feedback_and_invalid_commands_cannot_publish(self, make_robot):
@@ -610,7 +610,7 @@ class TestArmJointControl:
         with pytest.raises(TimeoutError):
             robot.send_action(action)
         robot._lowstate_received_at = time.monotonic()
-        for invalid in ({}, {**action, "kWaistYaw.q": 0.0}, dict.fromkeys(action, float("nan"))):
+        for invalid in ({}, {**action, "kWaistYaw.pos": 0.0}, dict.fromkeys(action, float("nan"))):
             with pytest.raises(ValueError):
                 robot.send_action(invalid)
         assert robot._arm_target is None
@@ -841,7 +841,7 @@ class TestRevo2Composition:
         assert set(sent) == set(action)
         for key in hand.action_features:
             assert sent[f"left_hand.{key}"] == pytest.approx(0.204)
-        assert robot._arm_target.keys() == {f"{joint.name}.q" for joint in G1_29_JointArmIndex}
+        assert robot._arm_target.keys() == {f"{joint.name}.pos" for joint in G1_29_JointArmIndex}
         hand.send_action.reset_mock()
         with pytest.raises(ValueError, match="all configured"):
             robot.send_action(dict.fromkeys(robot._arm_target, 0.1))
@@ -938,7 +938,7 @@ class TestRevo2Composition:
         hand = self.attach_hand(robot)
         hand.prepare_action.side_effect = ValueError("Missing motor targets")
         with pytest.raises(ValueError):
-            robot.send_action({"left_hand.motor_0.pos": 0.5, "kLeftShoulderPitch.q": 0.2})
+            robot.send_action({"left_hand.motor_0.pos": 0.5, "kLeftShoulderPitch.pos": 0.2})
         mocks["publisher_mock"].Write.assert_not_called()
         hand.send_action.assert_not_called()
 
