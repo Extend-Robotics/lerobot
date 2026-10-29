@@ -1,9 +1,11 @@
 # Server side
 
+For the current USB headset + USB Ethernet robot setup (`192.168.123.164`), see
+[the complete setup guide](PICO_G1D_TELEOPERATE_SETUP.md).
 For combined PICO arm control, see [PICO to G1-D teleoperation](TELEOP_PICO4.md).
 For head-camera streaming to a separate recording machine, see [Head camera](HEAD_CAMERA.md).
 
-ssh unitree@192.168.0.89
+ssh unitree@192.168.123.164
 
 1
 

@@ -24,7 +24,7 @@ class PicoToG1Joints(RobotActionProcessorStep):
     """Apply Unitree XR mapping and IK; retain only arm/hand joint actions."""
 
     hand_features: tuple[str, ...] = ()
-    timeout_s: float = 0.25
+    timeout_s: float = 0.5
     solver: Any = field(default=None, repr=False)
 
     def __post_init__(self) -> None:

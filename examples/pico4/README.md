@@ -30,10 +30,27 @@ this copy. The service stays in the foreground; Ctrl+C stops it.
 On the headset, install XRoboToolkit-PICO-1.1.1.apk from:
 https://github.com/XR-Robotics/XRoboToolkit-Unity-Client/releases/tag/v1.1.1
 
-The connected replacement PICO 4 Ultra already has this app installed. Connect
-the headset and PC to the same LAN. In XRoboToolkit select the PC (currently
-192.168.1.139), enable Controller tracking and Data & Control -> Send, and wake
-both controllers. Camera and body tracking are unnecessary.
+For the current PICO + G1-D setup, use USB for headset input and USB Ethernet
+for the robot (`192.168.123.164`, host `192.168.123.10/24`). See the
+[complete G1-D setup guide](../unitree_g1d/PICO_G1D_TELEOPERATE_SETUP.md).
+
+Enable USB debugging, connect a data cable, and accept the authorization prompt.
+With the PC service running, create the headset-to-host tunnel:
+
+```bash
+export PICO_ADB=/home/oleg/Documents/pico_teleop/tools/platform-tools/adb
+"$PICO_ADB" devices -l
+"$PICO_ADB" reverse tcp:63901 tcp:63901
+"$PICO_ADB" reverse --list
+```
+
+Set XRoboToolkit **PC Service** to **127.0.0.1**, press **Connect**, enable
+headset/controller tracking and **Data & Control → Send**, and wake both
+controllers. Recreate forwarding after USB/ADB reconnects. On other hosts,
+set `PICO_ADB` to the installed platform-tools executable.
+
+For Wi-Fi instead, put the headset and PC on the same reachable LAN and use
+the host's LAN IP in the app. Camera and body tracking are unnecessary.
 
 ## Test without a robot
 
@@ -79,7 +96,8 @@ The stock CLI calls `connect()` without measured wrist poses. For physical robot
 use an integration loop/processor which seeds measured TCP poses and maps the
 Cartesian outputs to the robot's action interface. G1 needs its existing arm IK
 plus joint-name mapping; SO-101 likewise needs its Cartesian-to-joint processor.
-Neither adapter is included in this port. Default identity poses are for testing,
+The G1 processor integration is documented in
+[the PICO-to-G1 guide](../unitree_g1d/TELEOP_PICO4.md). Default identity poses are for testing,
 not calibrated physical robot start poses.
 
 The SDK owns a process-global connection; use one Pico4 or BiPico4 instance per

@@ -48,7 +48,7 @@ python - <<'PY'
 from lerobot.cameras.zmq import ZMQCamera, ZMQCameraConfig
 
 config = ZMQCameraConfig(
-    server_address="192.168.0.89", port=5555, camera_name="head_camera",
+    server_address="192.168.123.164", port=5555, camera_name="head_camera",
     width=640, height=480, fps=30,
 )
 with ZMQCamera(config) as camera:
@@ -64,14 +64,16 @@ than writing images with an incorrect dataset schema. The robot rejects a latest
 image older than one second according to local receive time; source timestamps
 are not used to synchronize clocks between computers.
 
-The shared `configs/unitree_g1_pico.json` now includes `robot.cameras.head_camera`.
+The shared `configs/unitree_g1_pico.json` has cameras disabled by default.
+The command below adds the optional head camera at `192.168.123.164`, reached
+over the host USB Ethernet adapter. Headset input continues over USB/ADB.
 After starting the motor/hand bridges and PICO service as described in the
 [teleoperation guide](TELEOP_PICO4.md), record on the workstation:
 
 ```bash
 lerobot-record --config_path=configs/unitree_g1_pico.json \
-  --robot.robot_ip=192.168.0.89 \
-  --robot.cameras='{head_camera: {type: zmq, server_address: "192.168.0.89", port: 5555, camera_name: head_camera, width: 640, height: 480, fps: 30}}' \
+  --robot.robot_ip=192.168.123.164 \
+  --robot.cameras='{head_camera: {type: zmq, server_address: "192.168.123.164", port: 5555, camera_name: head_camera, width: 640, height: 480, fps: 30}}' \
   --dataset.repo_id=local/g1_head_camera \
   --dataset.single_task="Describe the task" \
   --dataset.fps=30 --dataset.num_episodes=1 \
@@ -83,7 +85,7 @@ camera as `observation.images.head_camera` alongside the existing joint state an
 actions. If capture dimensions or rate change, update both publisher flags and
 `robot.cameras.head_camera` settings. Keep dataset FPS at or below capture FPS to
 reduce repeated frames. Confirm the head view in the display and saved episode
-before collecting a dataset. To run the shared configuration without images,
-override `--robot.cameras='{}'`. Alternatively, edit the camera's `server_address`
-in the JSON configuration and omit the dictionary override from the command.
+before collecting a dataset. Omit the camera override to use the default
+configuration without images. Alternatively, add the camera dictionary to a local
+JSON configuration and omit the dictionary override from the command.
 The CLI accepts the complete camera dictionary, not flags for individual dictionary entries.

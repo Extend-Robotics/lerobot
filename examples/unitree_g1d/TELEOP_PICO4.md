@@ -12,14 +12,26 @@ classes have been replaced by the standard processor/robot path.
 
 ## Setup and preview
 
+The default setup uses **headset USB → host** and **host USB Ethernet → robot**.
+The robot is `192.168.123.164`; the host adapter `enx3c18a0d529cb` uses
+`192.168.123.10/24` without a gateway. See the [complete setup guide](PICO_G1D_TELEOPERATE_SETUP.md)
+for NetworkManager configuration, robot bridges, and USB troubleshooting.
+
 Run the usual G1 body bridge on the robot and start the PICO service:
 
 ```bash
+# Terminal A: leave the service running.
 bash scripts/pico4/start_service.sh
-bash scripts/pico4/teleop_g1d.sh --robot-ip <ROBOT_IP>
+# Terminal B: authorize USB debugging in the headset first.
+export PICO_ADB=/home/oleg/Documents/pico_teleop/tools/platform-tools/adb
+"$PICO_ADB" devices -l
+"$PICO_ADB" reverse tcp:63901 tcp:63901
+"$PICO_ADB" reverse --list
+# In XRoboToolkit: PC Service = 127.0.0.1, Connect, then Send.
+bash scripts/pico4/teleop_g1d.sh --robot-ip 192.168.123.164
 ```
 
-Enable headset and both controller tracking. Preview reads measured joints,
+Recreate the reverse mapping after USB/ADB reconnects. Enable headset and both controller tracking. Preview reads measured joints,
 runs the same teleop processor, and prints unbounded IK joint targets without
 publishing commands. It does not simulate robot motion.
 
@@ -31,7 +43,7 @@ SDK, and Pinocchio with CasADi. Install PICO with
 For execution:
 
 ```bash
-bash scripts/pico4/teleop_g1d.sh --robot-ip <ROBOT_IP> --execute
+bash scripts/pico4/teleop_g1d.sh --robot-ip 192.168.123.164 --execute
 ```
 
 Type `r` then Enter; commands start after two seconds. Ctrl+C stops execution.
@@ -46,24 +58,25 @@ after connection; they do not use the example's terminal start prompt.
 
 ```bash
 lerobot-teleoperate --config_path=configs/unitree_g1_pico.json \
-  --robot.robot_ip=<ROBOT_IP> --fps=30
+  --robot.robot_ip=192.168.123.164 --fps=30
 
 lerobot-record --config_path=configs/unitree_g1_pico.json \
-  --robot.robot_ip=<ROBOT_IP> \
+  --robot.robot_ip=192.168.123.164 \
   --dataset.repo_id=<USER/DATASET> --dataset.single_task="<TASK>" \
   --dataset.fps=30 --dataset.num_episodes=1
 
 lerobot-rollout --config_path=configs/unitree_g1_pico.json \
-  --robot.robot_ip=<ROBOT_IP> --policy.path=<JOINT_POLICY> --fps=30
+  --robot.robot_ip=192.168.123.164 --policy.path=<JOINT_POLICY> --fps=30
 ```
 
-The shared configuration enables a remote head camera. Start its publisher first,
-as described in [Head camera on a separate machine](HEAD_CAMERA.md). Camera and
-motor bridges are separate services; changing `robot.robot_ip` does not change
-`robot.cameras.head_camera.server_address`. Set both addresses when overriding the
-example IP by editing the JSON, or override the whole `--robot.cameras` dictionary
-as shown in the head-camera guide. Dictionary entries cannot be overridden using
-`--robot.cameras.head_camera.server_address`. This applies to teleoperation and rollout too.
+The shared configuration enables both Revo2 hands over ZMQ at `192.168.123.164`
+with motor speed `0.5`, and PICO input timeout `0.5` seconds. Start the hand
+bridge before using it. Cameras are disabled by default. For camera recording,
+start its publisher and add `robot.cameras` as described in
+[Head camera on a separate machine](HEAD_CAMERA.md). Camera addresses are
+independent of `robot.robot_ip`; override the whole camera dictionary when
+changing them. For arms without hands, remove `left_hand` and `right_hand`
+from a local copy of the JSON.
 
 For policy-only deployment, omit the teleop section from the configuration.
 PICO is used only for human input/corrections; policy output bypasses XR mapping
@@ -81,7 +94,7 @@ Run the independent hand bridge on the robot:
 
 ```bash
 python -m lerobot.robots.brainco_revo2.bridge
-bash scripts/pico4/teleop_g1d.sh --robot-ip <ROBOT_IP> --hands both
+bash scripts/pico4/teleop_g1d.sh --robot-ip 192.168.123.164 --hands both
 ```
 
 Add `--execute` for movement. Use `--hands left` or `right` for one hand.
@@ -104,7 +117,9 @@ This differs from the old example: target clipping happens when a command is
 accepted, rather than advancing a hidden target on every publisher tick.
 The same limits now apply to teleoperation and policy execution.
 
-Input/IK samples and robot commands expire after 0.25 seconds by default.
+The shared JSON sets PICO input freshness to 0.5 seconds; the standalone launcher
+uses the PICO class default of 0.25 seconds. Processor sample-age and robot command
+deadlines are configured separately and are not extended by the PICO timeout.
 A publisher fault or expired command stream passivates arms and waist and latches
 a fault; disconnect/reconnect before further execution. Shutdown stops publishing
 before sending the passive command. There is no five-second supported hold.
