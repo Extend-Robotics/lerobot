@@ -89,6 +89,8 @@ def make_default_processors(robot=None, teleop=None):
             PicoToG1Joints(
                 hand_features=tuple(key for key in robot.action_features if "_hand." in key),
                 timeout_s=min(robot.config.command_timeout_s, teleop.config.input_timeout_s),
+                grip_enable_threshold=teleop.config.grip_enable_threshold,
+                grip_disable_threshold=teleop.config.grip_disable_threshold,
             )
         ]
     robot_action_processor = make_default_robot_action_processor()

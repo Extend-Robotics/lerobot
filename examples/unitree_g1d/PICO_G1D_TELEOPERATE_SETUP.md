@@ -320,11 +320,11 @@ cd /home/oleg/extend_lerobot/lerobot
 
 Controls and behavior:
 
-- Both arms follow absolute wrist targets relative to headset position/yaw. Grips do **not** clutch or freeze the arms in this XR mode.
+- Hold each controller grip to make its arm follow absolute wrist targets relative to headset position/yaw. Release to hold that arm at its measured joint position. Arms initially hold until a grip is pressed. Re-pressing resumes the current absolute target without rebasing, through the existing smoothing and joint-step limits. Grip engages above `0.5` and releases at or below `0.3` by default.
 - Each trigger commands all six joints of its corresponding hand: 0 opens, 1 closes.
 - The processor maps Pico poses to 14 arm joint targets through IK. The robot limits the joint delta from measured positions to `arm_max_step=0.12` radians and hand changes to `hand_max_speed=1.0` normalized units/second by default.
 - `speed=0.3` in the hand configs sets the hand-driver motor-speed parameter; it is separate from the host hand-position rate limit.
-- Ctrl+C stops teleoperation. To restart, launch a new session; there is no supported pause/resume mode.
+- Ctrl+C stops teleoperation. Grips pause/resume arm following during a session; after stopping, launch a new session to restart.
 
 For an execution path with a manual start prompt instead of the standard CLI:
 

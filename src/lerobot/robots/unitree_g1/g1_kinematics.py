@@ -53,6 +53,10 @@ class WeightedMovingFilter:
         self._data_queue.append(new_data)
         self._filtered_data = self._apply_filter()
 
+    def reset(self) -> None:
+        self._data_queue.clear()
+        self._filtered_data = np.zeros(self._data_size)
+
     @property
     def filtered_data(self):
         return self._filtered_data

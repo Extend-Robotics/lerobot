@@ -48,7 +48,7 @@ bash scripts/pico4/teleop_g1d.sh --robot-ip 192.168.123.164 --execute
 
 Type `r` then Enter; commands start after two seconds. Ctrl+C stops execution.
 There is no supported pause/resume mode: stop and reconnect to begin again.
-Both arms follow absolute head-yaw-relative wrist targets; grips do not clutch.
+Each arm follows its absolute head-yaw-relative wrist target only while its controller grip is held. Releasing a grip holds that arm at its measured joint position; pressing again resumes the current absolute target without rebasing. Triggers continue controlling the hands independently.
 
 ## Standard scripts
 

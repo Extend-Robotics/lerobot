@@ -26,10 +26,21 @@ class PicoToG1Joints(RobotActionProcessorStep):
     hand_features: tuple[str, ...] = ()
     timeout_s: float = 0.5
     solver: Any = field(default=None, repr=False)
+    grip_enable_threshold: float = 0.5
+    grip_disable_threshold: float = 0.3
+    _enabled: tuple[bool, bool] = field(default=(False, False), init=False, repr=False)
+    _held_q: np.ndarray | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if not 0 <= self.grip_disable_threshold < self.grip_enable_threshold <= 1:
+            raise ValueError("PICO grip thresholds must satisfy 0 <= disable < enable <= 1")
         if self.solver is None:
             self.solver = G1_29_ArmIK(unitree_xr=True)
+
+    def reset(self) -> None:
+        self._enabled = (False, False)
+        self._held_q = None
+        self.solver.smooth_filter.reset()
 
     def action(self, action: RobotAction) -> RobotAction:
         began = time.monotonic()
@@ -45,17 +56,41 @@ class PicoToG1Joints(RobotActionProcessorStep):
             side: np.array([action[f"{side}.{key}"] for key in POSE_FIELDS])
             for side in ("head", "left", "right")
         }
-        targets = map_xr_wrist_targets(poses)
-        candidate, _ = self.solver.solve_ik(*targets, q, np.zeros(14))
-        candidate = np.asarray(candidate, dtype=float)
-        if not self.solver.last_solve_success or candidate.shape != (14,) or not np.isfinite(candidate).all():
-            raise ValueError("IK failed or returned invalid arm joints")
-        order = self.solver._arm_reorder_pin_to_g1
-        model = self.solver.reduced_robot.model
-        if np.any(candidate < model.lowerPositionLimit[order]) or np.any(
-            candidate > model.upperPositionLimit[order]
-        ):
-            raise ValueError("IK violates model joint limits")
+        # Validate tracking even while released; clutching does not bypass watchdogs.
+        targets = list(map_xr_wrist_targets(poses))
+        grips = np.array([action[f"{side}.grip"] for side in ("left", "right")], dtype=float)
+        if not np.isfinite(grips).all() or np.any((grips < 0) | (grips > 1)):
+            raise ValueError("PICO grips must be in [0, 1]")
+        enabled_values = [
+            bool(grip > (self.grip_disable_threshold if previous else self.grip_enable_threshold))
+            for grip, previous in zip(grips, self._enabled, strict=True)
+        ]
+        enabled = (enabled_values[0], enabled_values[1])
+        held_q = q.copy() if self._held_q is None else self._held_q.copy()
+        for index, (previous, active) in enumerate(zip(self._enabled, enabled, strict=True)):
+            if previous and not active:
+                # Stop at the measured position, not an unfinished IK target.
+                held_q[index * 7 : (index + 1) * 7] = q[index * 7 : (index + 1) * 7]
+        candidate = held_q.copy()
+        if any(enabled):
+            if not all(enabled):
+                held_targets = self.solver.forward_kinematics(held_q)
+                for index, active in enumerate(enabled):
+                    if not active:
+                        targets[index] = held_targets[index]
+            solved, _ = self.solver.solve_ik(*targets, q, np.zeros(14))
+            solved = np.asarray(solved, dtype=float)
+            if not self.solver.last_solve_success or solved.shape != (14,) or not np.isfinite(solved).all():
+                raise ValueError("IK failed or returned invalid arm joints")
+            order = self.solver._arm_reorder_pin_to_g1
+            model = self.solver.reduced_robot.model
+            if np.any(solved < model.lowerPositionLimit[order]) or np.any(
+                solved > model.upperPositionLimit[order]
+            ):
+                raise ValueError("IK violates model joint limits")
+            for index, active in enumerate(enabled):
+                if active:
+                    candidate[index * 7 : (index + 1) * 7] = solved[index * 7 : (index + 1) * 7]
         if time.monotonic() - action["sample_time"] > self.timeout_s:
             raise TimeoutError("PICO sample expired during IK")
         result = dict(zip(ARM_KEYS, candidate.tolist(), strict=True))
@@ -65,6 +100,8 @@ class PicoToG1Joints(RobotActionProcessorStep):
             if not np.isfinite(trigger) or not 0 <= trigger <= 1:
                 raise ValueError("PICO triggers must be in [0, 1]")
             result[key] = trigger
+        self._enabled = enabled
+        self._held_q = held_q
         return result
 
     def transform_features(

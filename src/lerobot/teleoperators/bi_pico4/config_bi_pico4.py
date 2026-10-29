@@ -70,6 +70,8 @@ class BiPico4Config(TeleoperatorConfig):
     position_jump_threshold: float = 0.1
 
     def __post_init__(self) -> None:
+        if not 0 <= self.grip_disable_threshold < self.grip_enable_threshold <= 1:
+            raise ValueError("PICO grip thresholds must satisfy 0 <= disable < enable <= 1")
         if self.output_mode not in ("cartesian", "xr"):
             raise ValueError("PICO output_mode must be cartesian or xr")
         if not math.isfinite(self.input_timeout_s) or self.input_timeout_s <= 0:

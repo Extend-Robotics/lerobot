@@ -123,12 +123,13 @@ def test_controller_sample_retries_stream_changes_and_reads_raw_triggers(sdk):
         sdk.get_time_stamp_ns.side_effect = [1, 1, 2, 2, 2, 2]
         sdk.get_left_trigger.return_value = 0.25
         sdk.get_right_trigger.return_value = 0.75
-        stamp, poses, triggers = teleop.get_controller_sample()
+        stamp, poses, triggers, grips = teleop.get_controller_sample()
         assert stamp == 2
         assert set(poses) == {"head", "left", "right"}
         assert triggers == {"left": 0.25, "right": 0.75}
         sdk.get_hand_input_sample.assert_not_called()
-        sdk.get_left_grip.assert_not_called()
+        assert grips == {"left": 0.0, "right": 0.0}
+        assert sdk.get_left_grip.call_count == 2
     finally:
         teleop.disconnect()
 
@@ -242,3 +243,33 @@ def test_startup_timeout_identifies_missing_controller(sdk):
         teleop.connect()
     assert not teleop.is_connected
     sdk.close.assert_called_once()
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1, float("nan")])
+def test_controller_sample_rejects_invalid_grip(sdk, value):
+    sdk.get_headset_pose.return_value = [0, 1.5, 0, 0, 0, 0, 1]
+    sdk.get_time_stamp_ns.return_value = 123
+    teleop = BiPico4(BiPico4Config(output_mode="xr"))
+    teleop.connect()
+    try:
+        sdk.get_left_grip.return_value = value
+        with pytest.raises(ValueError, match="grip"):
+            teleop.get_action()
+    finally:
+        teleop.disconnect()
+
+
+def test_xr_action_exposes_independent_raw_grips(sdk):
+    sdk.get_headset_pose.return_value = [0, 1.5, 0, 0, 0, 0, 1]
+    sdk.get_time_stamp_ns.return_value = 123
+    teleop = BiPico4(BiPico4Config(output_mode="xr"))
+    teleop.connect()
+    try:
+        sdk.get_left_grip.return_value = 0.8
+        sdk.get_right_grip.return_value = 0.2
+        action = teleop.get_action()
+        assert action["left.grip"] == 0.8
+        assert action["right.grip"] == 0.2
+        assert set(action) == set(teleop.action_features)
+    finally:
+        teleop.disconnect()

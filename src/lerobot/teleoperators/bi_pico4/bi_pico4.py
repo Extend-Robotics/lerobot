@@ -168,7 +168,7 @@ class BiPico4(Teleoperator):
                     for side in ("head", "left", "right")
                     for field in ("x", "y", "z", "qx", "qy", "qz", "qw")
                 ]
-                + ["left.trigger", "right.trigger", "sample_time"],
+                + ["left.trigger", "right.trigger", "left.grip", "right.grip", "sample_time"],
                 float,
             )
         return dict.fromkeys(
@@ -345,7 +345,7 @@ class BiPico4(Teleoperator):
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
         if self.config.output_mode == "xr":
-            stamp, poses, triggers = self.get_controller_sample()
+            stamp, poses, triggers, grips = self.get_controller_sample()
             now = time.monotonic()
             if stamp <= 0 or (self._source_stamp is not None and stamp < self._source_stamp):
                 raise TimeoutError("PICO source timestamp restarted or is invalid")
@@ -360,6 +360,7 @@ class BiPico4(Teleoperator):
                 for field, value in zip(("x", "y", "z", "qx", "qy", "qz", "qw"), pose, strict=True)
             }
             result.update({f"{side}.trigger": value for side, value in triggers.items()})
+            result.update({f"{side}.grip": value for side, value in grips.items()})
             result["sample_time"] = self._source_at
             return result
         left_action = self._left_pico4.get_action()
@@ -389,8 +390,10 @@ class BiPico4(Teleoperator):
             poses[name] = pose.copy()
         return int(self._xrt.get_time_stamp_ns()), poses
 
-    def get_controller_sample(self) -> tuple[int, dict[str, np.ndarray], dict[str, float]]:
-        """Read raw poses and triggers, retrying if the SDK stream advances.
+    def get_controller_sample(
+        self,
+    ) -> tuple[int, dict[str, np.ndarray], dict[str, float], dict[str, float]]:
+        """Read raw poses, triggers and grips, retrying if the SDK stream advances.
 
         Uses the controller SDK getters, with no hand-tracking requirement.
         The legacy SDK timestamp covers the stream, not tracking confidence.
@@ -405,9 +408,12 @@ class BiPico4(Teleoperator):
             }
             if any(not np.isfinite(value) or not 0 <= value <= 1 for value in triggers.values()):
                 raise ValueError("Invalid PICO controller trigger; expected [0, 1]")
+            grips = {side: float(getattr(self._xrt, f"get_{side}_grip")()) for side in ("left", "right")}
+            if any(not np.isfinite(value) or not 0 <= value <= 1 for value in grips.values()):
+                raise ValueError("Invalid PICO controller grip; expected [0, 1]")
             after = int(self._xrt.get_time_stamp_ns())
             if before == stamp == after and stamp > 0:
-                return stamp, poses, triggers
+                return stamp, poses, triggers, grips
         raise RuntimeError("PICO controller sample is unavailable or changed during reading")
 
     def get_control_status(self) -> tuple[int, dict[str, float]]:

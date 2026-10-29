@@ -107,3 +107,13 @@ def test_native_ik_preserves_stationary_measured_pose():
     assert np.max(np.abs(candidate - q)) > 1e-4
     for target, actual in zip(targets, ik.forward_kinematics(candidate), strict=True):
         assert np.linalg.norm(target[:3, 3] - actual[:3, 3]) < 0.002
+
+
+def test_joint_filter_reset_discards_previous_episode():
+    filtered = WeightedMovingFilter([0.4, 0.3, 0.2, 0.1], 14, newest_first=True)
+    for value in range(4):
+        filtered.add_data(np.full(14, value))
+    filtered.reset()
+    np.testing.assert_array_equal(filtered.filtered_data, np.zeros(14))
+    filtered.add_data(np.full(14, 0.5))
+    np.testing.assert_array_equal(filtered.filtered_data, np.full(14, 0.5))
