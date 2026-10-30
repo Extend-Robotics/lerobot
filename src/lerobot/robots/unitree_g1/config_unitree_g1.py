@@ -14,11 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from dataclasses import dataclass, field
 
 from lerobot.cameras import CameraConfig
 from lerobot.envs.configs import G1EndEffector, UnitreeG1MujocoEnv
 
+from ..brainco_revo2.config_brainco_revo2 import BraincoRevo2HandConfig
 from ..config import RobotConfig
 
 _GAINS: dict[str, dict[str, list[float]]] = {
@@ -48,6 +50,14 @@ _DEFAULT_KP, _DEFAULT_KD = _build_gains()
 @RobotConfig.register_subclass("unitree_g1")
 @dataclass
 class UnitreeG1Config(RobotConfig):
+    # Read-only suppresses all command writes. Arm-only freezes waist targets and disables legs.
+    read_only: bool = False
+    arm_commands_only: bool = False
+    # Shared by teleoperation and policy execution in arm-only mode.
+    command_timeout_s: float = 0.25
+    arm_max_step: float = 0.12  # radians from measured joints, scaled across both arms
+    hand_max_speed: float = 1.0  # normalized position units/second
+
     kp: list[float] = field(default_factory=lambda: _DEFAULT_KP.copy())
     kd: list[float] = field(default_factory=lambda: _DEFAULT_KD.copy())
 
@@ -59,6 +69,10 @@ class UnitreeG1Config(RobotConfig):
 
     # Launch mujoco simulation
     is_simulation: bool = True
+
+    # Optional physical hands, independent of the simulation end-effector asset.
+    left_hand: BraincoRevo2HandConfig | None = None
+    right_hand: BraincoRevo2HandConfig | None = None
 
     # Supports dummy, dex1, dex3
     end_effector: G1EndEffector = G1EndEffector.DEX1
@@ -88,6 +102,15 @@ class UnitreeG1Config(RobotConfig):
 
     def __post_init__(self):
         super().__post_init__()
+        for value in (self.control_dt, self.command_timeout_s, self.arm_max_step, self.hand_max_speed):
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError("Control periods and command limits must be finite and positive")
+        if (self.read_only or self.arm_commands_only) and self.controller is not None:
+            raise ValueError("Read-only/arm-only operation cannot run a whole-body controller")
+        if self.is_simulation and (self.left_hand is not None or self.right_hand is not None):
+            raise ValueError(
+                "Revo2 hands require is_simulation=False; no Revo2 simulation model is available"
+            )
         self.end_effector = G1EndEffector(self.end_effector)  # from Python it is still a string
         self.sim_env = UnitreeG1MujocoEnv(
             publish_images=self.sim_publish_images,

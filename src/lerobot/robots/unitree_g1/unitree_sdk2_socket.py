@@ -123,12 +123,16 @@ def ChannelFactoryInitialize(domain_id: int = 0, config: Any = None) -> None:  #
     # lowcmd: send robot commands
     lowcmd_sock = ctx.socket(zmq.PUSH)
     lowcmd_sock.setsockopt(zmq.CONFLATE, 1)  # keep only last message
+    lowcmd_sock.setsockopt(zmq.SNDTIMEO, 100)
+    lowcmd_sock.setsockopt(zmq.LINGER, 0)
     lowcmd_sock.connect(f"tcp://{robot_ip}:{LOWCMD_PORT}")
     _lowcmd_sock = lowcmd_sock
 
     # lowstate: receive robot observations
     lowstate_sock = ctx.socket(zmq.SUB)
     lowstate_sock.setsockopt(zmq.CONFLATE, 1)  # keep only last message
+    lowstate_sock.setsockopt(zmq.RCVTIMEO, 100)
+    lowstate_sock.setsockopt(zmq.LINGER, 0)
     lowstate_sock.connect(f"tcp://{robot_ip}:{LOWSTATE_PORT}")
     lowstate_sock.setsockopt_string(zmq.SUBSCRIBE, "")
     _lowstate_sock = lowstate_sock
@@ -165,11 +169,14 @@ class ChannelSubscriber:
         """Initialize the subscriber (no-op for ZMQ)."""
         pass
 
-    def Read(self) -> LowStateMsg:  # noqa: N802
+    def Read(self) -> LowStateMsg | None:  # noqa: N802
         """Receive and deserialize a state message from the robot."""
         if _lowstate_sock is None:
             raise RuntimeError("ChannelFactoryInitialize must be called first")
 
-        payload = _lowstate_sock.recv()
+        try:
+            payload = _lowstate_sock.recv()
+        except zmq.Again:
+            return None
         msg_dict = json.loads(payload.decode("utf-8"))
         return LowStateMsg(msg_dict.get("data", {}))

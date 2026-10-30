@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 
 # Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Upstream XR profile: Copyright 2025 Unitree Robotics, Apache-2.0.
+# See examples/unitree_g1d/UNITREE_XR_NOTICES.md for source revisions and notices.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,9 +26,11 @@ logger = logging.getLogger(__name__)
 
 
 class WeightedMovingFilter:
-    def __init__(self, weights, data_size=14):
+    def __init__(self, weights, data_size=14, *, newest_first: bool = False):
         self._window_size = len(weights)
         self._weights = np.array(weights)
+        if newest_first:
+            self._weights = self._weights[::-1]
         self._data_size = data_size
         self._filtered_data = np.zeros(self._data_size)
         self._data_queue = deque(maxlen=self._window_size)
@@ -49,13 +53,17 @@ class WeightedMovingFilter:
         self._data_queue.append(new_data)
         self._filtered_data = self._apply_filter()
 
+    def reset(self) -> None:
+        self._data_queue.clear()
+        self._filtered_data = np.zeros(self._data_size)
+
     @property
     def filtered_data(self):
         return self._filtered_data
 
 
 class G1_29_ArmIK:  # noqa: N801
-    def __init__(self, unit_test=False):
+    def __init__(self, unit_test=False, *, unitree_xr: bool = False):
         import casadi
         import pinocchio as pin
         from huggingface_hub import snapshot_download
@@ -201,7 +209,8 @@ class G1_29_ArmIK:  # noqa: N801
         self.rotation_cost = casadi.sumsqr(
             self.rotational_error(self.var_q, self.param_tf_l, self.param_tf_r)
         )
-        self.regularization_cost = casadi.sumsqr(self.var_q)
+        # Redundant arm joints should stay near the measured pose, not drift
+        # toward zero even when the requested wrists have not moved.
         self.smooth_cost = casadi.sumsqr(self.var_q - self.var_q_last)
 
         # Setting optimization constraints and goals
@@ -212,50 +221,85 @@ class G1_29_ArmIK:  # noqa: N801
                 self.reduced_robot.model.upperPositionLimit,
             )
         )
-        self.opti.minimize(
-            50 * self.translational_cost
-            + self.rotation_cost
-            + 0.02 * self.regularization_cost
-            + 0.1 * self.smooth_cost
-        )
+        objective = 50 * self.translational_cost + self.rotation_cost + 0.1 * self.smooth_cost
+        if unitree_xr:
+            # xr_teleoperate G1_29_ArmIK: bias redundant joints toward zero.
+            objective += 0.02 * casadi.sumsqr(self.var_q)
+        self.opti.minimize(objective)
 
         opts = {
             "ipopt": {"print_level": 0, "max_iter": 50, "tol": 1e-6},
             "print_time": False,  # print or not
             "calc_lam_p": False,  # https://github.com/casadi/casadi/wiki/FAQ:-Why-am-I-getting-%22NaN-detected%22in-my-optimization%3F
         }
+        if unitree_xr:
+            opts = {
+                "expand": True,
+                "detect_simple_bounds": True,
+                "calc_lam_p": False,
+                "print_time": False,
+                "ipopt.sb": "yes",
+                "ipopt.print_level": 0,
+                "ipopt.max_iter": 30,
+                "ipopt.tol": 1e-4,
+                "ipopt.acceptable_tol": 5e-4,
+                "ipopt.acceptable_iter": 5,
+                "ipopt.warm_start_init_point": "yes",
+                "ipopt.derivative_test": "none",
+                "ipopt.jacobian_approximation": "exact",
+            }
         self.opti.solver("ipopt", opts)
 
         self.init_data = np.zeros(self.reduced_robot.model.nq)
-        self.smooth_filter = WeightedMovingFilter(np.array([0.4, 0.3, 0.2, 0.1]), 14)
+        self.smooth_filter = WeightedMovingFilter(np.array([0.4, 0.3, 0.2, 0.1]), 14, newest_first=unitree_xr)
+        self.last_solve_success = False
 
-    def solve_ik(self, left_wrist, right_wrist, current_lr_arm_motor_q=None, current_lr_arm_motor_dq=None):
+    def forward_kinematics(self, arm_q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Return left/right end-effector transforms in the reduced model's base frame.
+
+        Arm positions use G1 motor order. Legs and waist are fixed at zero in this model.
+        """
+        q_pin = np.asarray(arm_q)[self._arm_reorder_g1_to_pin]
+        data = self.reduced_robot.model.createData()
+        self._pin.framesForwardKinematics(self.reduced_robot.model, data, q_pin)
+        return data.oMf[self.L_hand_id].homogeneous.copy(), data.oMf[self.R_hand_id].homogeneous.copy()
+
+    def solve_ik(
+        self,
+        left_wrist,
+        right_wrist,
+        current_lr_arm_motor_q=None,
+        current_lr_arm_motor_dq=None,
+        *,
+        smooth: bool = True,
+    ):
+        """Solve in G1 motor order; disable smoothing when the caller limits joint speed."""
+        self.last_solve_success = False
         if current_lr_arm_motor_q is not None:
-            self.init_data = current_lr_arm_motor_q
+            self.init_data = np.asarray(current_lr_arm_motor_q)[self._arm_reorder_g1_to_pin]
         self.opti.set_initial(self.var_q, self.init_data)
 
         self.opti.set_value(self.param_tf_l, left_wrist)
         self.opti.set_value(self.param_tf_r, right_wrist)
         self.opti.set_value(self.var_q_last, self.init_data)  # for smooth
 
-        converged = True
         try:
             self.opti.solve()
-            sol_q = self.opti.value(self.var_q)
+            sol_q = np.asarray(self.opti.value(self.var_q), dtype=float)
+            if sol_q.shape != (14,) or not np.isfinite(sol_q).all():
+                raise ValueError("Nonfinite or malformed IK solution")
         except Exception as e:
-            converged = False
             logger.error(f"IK convergence error: {e}")
-            sol_q = self.opti.debug.value(self.var_q)
-
-        self.smooth_filter.add_data(sol_q)
-        sol_q = self.smooth_filter.filtered_data
-        self.init_data = sol_q
-
-        if not converged:
-            logger.error(
-                f"sol_q:{sol_q} \nmotorstate: \n{current_lr_arm_motor_q} \nleft_pose: \n{left_wrist} \nright_pose: \n{right_wrist}"
+            # Failed iterates must not enter the moving filter or warm-start history.
+            return (
+                self.init_data[self._arm_reorder_pin_to_g1].copy(),
+                np.zeros(self.reduced_robot.model.nv),
             )
-            return current_lr_arm_motor_q, np.zeros(self.reduced_robot.model.nv)
+
+        if smooth:
+            self.smooth_filter.add_data(sol_q)
+            sol_q = self.smooth_filter.filtered_data
+        self.init_data = sol_q
 
         sol_tauff = self._pin.rnea(
             self.reduced_robot.model,
@@ -265,7 +309,8 @@ class G1_29_ArmIK:  # noqa: N801
             np.zeros(self.reduced_robot.model.nv),
         )
 
-        return sol_q, sol_tauff
+        self.last_solve_success = True
+        return sol_q[self._arm_reorder_pin_to_g1], sol_tauff[self._arm_reorder_pin_to_g1]
 
     def solve_tau(self, current_lr_arm_motor_q=None, current_lr_arm_motor_dq=None):
         try:
