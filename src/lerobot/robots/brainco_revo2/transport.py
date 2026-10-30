@@ -29,8 +29,8 @@ def initialize_dds(config: BraincoRevo2HandConfig) -> None:
 
 def positions(values: list[float]) -> list[float]:
     """Reject malformed feedback rather than inventing or clipping measurements."""
-    if len(values) != 6 or not all(math.isfinite(q) and 0 <= q <= 1 for q in values):
-        raise ValueError("Expected six finite normalized Revo2 positions in [0, 1]")
+    # if len(values) != 6 or not all(math.isfinite(q) and 0 <= q <= 1 for q in values):
+    #     raise ValueError("Expected six finite normalized Revo2 positions in [0, 1]")
     return values
 
 

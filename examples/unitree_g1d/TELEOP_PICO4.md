@@ -63,7 +63,7 @@ lerobot-teleoperate --config_path=configs/unitree_g1_pico.json \
 lerobot-record --config_path=configs/unitree_g1_pico.json \
   --robot.robot_ip=192.168.123.164 \
   --dataset.repo_id=<USER/DATASET> --dataset.single_task="<TASK>" \
-  --dataset.fps=30 --dataset.num_episodes=1
+  --dataset.fps=30 --dataset.num_episodes=1 --dataset.push_to_hub=false
 
 lerobot-rollout --config_path=configs/unitree_g1_pico.json \
   --robot.robot_ip=192.168.123.164 --policy.path=<JOINT_POLICY> --fps=30
@@ -71,16 +71,17 @@ lerobot-rollout --config_path=configs/unitree_g1_pico.json \
 
 The shared configuration enables both Revo2 hands over ZMQ at `192.168.123.164`
 with motor speed `0.5`, and PICO input timeout `0.5` seconds. Start the hand
-bridge before using it. Cameras are disabled by default. For camera recording,
-start its publisher and add `robot.cameras` as described in
-[Head camera on a separate machine](HEAD_CAMERA.md). Camera addresses are
+bridge before using it. The head and both wrist cameras are enabled by default. Start the three-camera
+publisher before using these commands, as described in
+[Three-camera streaming and data collection](HEAD_CAMERA.md). To run without images,
+pass `--robot.cameras='{}'`. Camera addresses are
 independent of `robot.robot_ip`; override the whole camera dictionary when
 changing them. For arms without hands, remove `left_hand` and `right_hand`
 from a local copy of the JSON.
 
 For policy-only deployment, omit the teleop section from the configuration.
 PICO is used only for human input/corrections; policy output bypasses XR mapping
-and IK. Configure additional cameras in `robot.cameras` when collecting visual observations.
+and IK. The default visual observations include all three configured cameras.
 This repository's collection command is `lerobot-record`.
 
 Arm-only mode advertises exactly 14 arm `.q` features and any configured hand

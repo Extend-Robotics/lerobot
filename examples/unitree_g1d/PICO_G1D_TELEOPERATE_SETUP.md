@@ -53,7 +53,7 @@ The host must reach the robot's TCP ports:
 | Body/arms | 6000 | 6001 |
 | Left Revo2 hand | 6002 | 6003 |
 | Right Revo2 hand | 6004 | 6005 |
-| Head camera | — | 5555 |
+| Head and both wrist cameras (one publisher) | — | 5555 |
 
 Keep robot and host clocks synchronized through your normal NTP/time-sync service. Hand feedback age and command expiry use wall-clock timestamps. On each machine, `timedatectl status` can help check synchronization.
 
@@ -114,35 +114,30 @@ python /home/unitree/Documents/lerobot_unitree/lerobot/examples/unitree_g1d/read
   --transport dds --side right
 ```
 
-## 4. Optional robot terminal C: start the head camera
+## 4. Robot terminal C: start all three cameras
 
-Skip this section for the default configuration, which has no camera. For images, start the publisher and add the camera to a local configuration in section 6. In a third SSH terminal, on the robot:
+The shared config enables the head and both wrist cameras. Follow sections 1–3
+of [Three-camera streaming and data collection](HEAD_CAMERA.md) to stop
+`teleimager.service`, reattach `uvcvideo`, identify each physical capture node,
+and start the named three-camera publisher on TCP 5555. Keep it running.
 
-```bash
-source /home/unitree/miniconda3/etc/profile.d/conda.sh
-conda activate lerobot
-cd /home/unitree/Documents/lerobot_unitree/lerobot
-lerobot-find-cameras opencv
-```
-
-Identify the actual head-camera device. Device `4` below is the existing example default, not guaranteed to be the head camera:
+The confirmed g1d mapping is head `/dev/video4`, left hand `/dev/video2`, and
+right hand `/dev/video0`. In the robot's activated `lerobot` environment:
 
 ```bash
 python -m lerobot.cameras.zmq.image_server \
-  --device 4 --width 640 --height 480 --fps 30 --fourcc MJPG --port 5555
+  --camera head_camera=/dev/video4 \
+  --camera left_wrist_camera=/dev/video2 \
+  --camera right_wrist_camera=/dev/video0 \
+  --width 640 --height 480 --fps 30 --fourcc MJPG --port 5555
 ```
 
-Keep it running. A stable device path can replace `4`, for example `--device /dev/v4l/by-id/ACTUAL_CAMERA_DEVICE`. Use a resolution, frame rate, and capture format supported by the camera. The published stream is named `head_camera` and contains RGB images, not depth. This requires an OpenCV/V4L2-accessible camera; a vendor-only video stream needs a separate capture adapter.
+Verify these device numbers again after USB reconnects or reboot.
 
-Alternatively, combine arms and camera in terminal A:
-
-```bash
-python -m lerobot.robots.unitree_g1.run_g1_server \
-  --camera --camera-device 4 --camera-width 640 --camera-height 480 \
-  --camera-fps 30 --camera-port 5555
-```
-
-Choose either the separate camera publisher or the combined server. Do not run both on the same device/port. Additional cameras require matching publishers and entries in the host's `robot.cameras` dictionary; this guide configures the supported head-camera example.
+Run the body bridge in section 2 without `--camera`: its combined camera option
+only supplies a single head view. The three-camera publisher runs independently
+and does not initialize motor control. To operate without cameras, explicitly
+pass `--robot.cameras='{}'` on the host command.
 
 ## 5. Host terminal A: start the Pico service
 
@@ -221,9 +216,9 @@ To switch from Wi-Fi to USB, disconnect the app session, establish the ADB rever
 
 ## 6. Host terminal B: prepare an explicit local configuration
 
-The base JSON is ready for the current setup: arms and both Revo2 hands at `192.168.123.164`, hand motor speed `0.5`, no camera, and PICO `input_timeout_s=0.5`. It can be used directly as the config path in section 8.
+The base JSON is ready for the current setup: arms and both Revo2 hands at `192.168.123.164`, hand motor speed `0.5`, three cameras, and PICO `input_timeout_s=0.5`. It can be used directly as the config path in section 8.
 
-For optional head-camera recording, the following creates a separate runtime JSON with the robot/camera IP and both hands at motor speed `0.3`. Start the camera publisher first. This preserves the checked-in base configuration.
+If the robot or camera publisher has a different IP, the following creates a separate runtime JSON while keeping all three cameras and both hands at motor speed `0.5`. Start the camera publisher first. Otherwise use the shared config directly.
 
 ```bash
 source /home/oleg/extend_lerobot/activate_unitree_g1.sh
@@ -241,20 +236,14 @@ output = Path('/home/oleg/extend_lerobot/g1d_pico_local.json')
 config = json.loads(source.read_text())
 robot = config['robot']
 robot['robot_ip'] = os.environ['G1D_ROBOT_IP']
-robot['cameras'] = {
-    'head_camera': {
-        'type': 'zmq',
-        'server_address': os.environ['G1D_CAMERA_IP'],
-        'port': 5555, 'camera_name': 'head_camera',
-        'width': 640, 'height': 480, 'fps': 30, 'color_mode': 'rgb',
-    },
-}
+for camera in robot['cameras'].values():
+    camera['server_address'] = os.environ['G1D_CAMERA_IP']
 for side in ('left', 'right'):
     robot[f'{side}_hand'] = {
         'side': side,
         'transport': 'zmq',
         'robot_ip': os.environ['G1D_ROBOT_IP'],
-        'speed': 0.3,
+        'speed': 0.5,
     }
 output.write_text(json.dumps(config, indent=2) + '\n')
 print(output)
@@ -285,28 +274,15 @@ bash /home/oleg/extend_lerobot/lerobot/scripts/pico4/teleop_g1d.sh \
 
 Preview reads robot feedback and prints IK targets; it does not simulate robot motion, exercise the camera, or apply execution-time arm target clipping. The already-started body bridge still has the mode-switching behavior described above.
 
-If using the optional camera configuration, check the camera independently:
-
-```bash
-uv run --no-project --python /home/oleg/extend_lerobot/envs/unitree-g1/bin/python python - <<'PY'
-import json
-from lerobot.cameras.zmq import ZMQCamera, ZMQCameraConfig
-
-with open('/home/oleg/extend_lerobot/g1d_pico_local.json') as f:
-    settings = json.load(f)['robot']['cameras']['head_camera']
-settings.pop('type')
-with ZMQCamera(ZMQCameraConfig(**settings)) as camera:
-    for _ in range(30):
-        frame = camera.async_read(timeout_ms=1000)
-        print(frame.shape, frame.dtype)
-PY
-```
-
-Expect `(480, 640, 3) uint8`. Stop all diagnostic clients before executing teleoperation.
+Check all three camera views independently using the host verification command
+in [the camera guide, section 3](HEAD_CAMERA.md#3-host-verify-all-views-without-moving-the-robot).
+It uses the shared config and writes one PNG per stream without moving the robot.
+If using a local JSON, change the config path in that check too. Confirm head,
+left wrist, and right wrist identities before execution.
 
 ## 8. Run lerobot-teleoperate on the host
 
-With the body and hand services running and the headset/controllers tracked over USB, execute in host terminal B. For the optional camera setup, replace the config path below with `/home/oleg/extend_lerobot/g1d_pico_local.json`:
+With the body and hand services running and the headset/controllers tracked over USB, execute in host terminal B. If you created a local config, replace the config path below with `/home/oleg/extend_lerobot/g1d_pico_local.json`:
 
 ```bash
 source /home/oleg/extend_lerobot/activate_unitree_g1.sh
@@ -316,14 +292,14 @@ cd /home/oleg/extend_lerobot/lerobot
   --fps=30 --display_data=false
 ```
 
-**This command starts sending commands as soon as connection/setup completes. There is no `r` prompt or two-second countdown in `lerobot-teleoperate`.** Have the operator ready before launching it. Set `--display_data=false` for a host without a graphical display; the configured camera is still consumed. `--teleop_time_s=30` optionally bounds the teleoperation loop to 30 seconds, but still executes physical motion.
+**This command starts sending commands as soon as connection/setup completes. There is no `r` prompt or two-second countdown in `lerobot-teleoperate`.** Have the operator ready before launching it. Set `--display_data=false` for a host without a graphical display; all three configured cameras are still consumed. `--teleop_time_s=30` optionally bounds the teleoperation loop to 30 seconds, but still executes physical motion.
 
 Controls and behavior:
 
 - Hold each controller grip to make its arm follow absolute wrist targets relative to headset position/yaw. Release to hold that arm at its measured joint position. Arms initially hold until a grip is pressed. Re-pressing resumes the current absolute target without rebasing, through the existing smoothing and joint-step limits. Grip engages above `0.5` and releases at or below `0.3` by default.
 - Each trigger commands all six joints of its corresponding hand: 0 opens, 1 closes.
 - The processor maps Pico poses to 14 arm joint targets through IK. The robot limits the joint delta from measured positions to `arm_max_step=0.12` radians and hand changes to `hand_max_speed=1.0` normalized units/second by default.
-- `speed=0.3` in the hand configs sets the hand-driver motor-speed parameter; it is separate from the host hand-position rate limit.
+- `speed=0.5` in the hand configs sets the hand-driver motor-speed parameter; it is separate from the host hand-position rate limit.
 - Ctrl+C stops teleoperation. Grips pause/resume arm following during a session; after stopping, launch a new session to restart.
 
 For an execution path with a manual start prompt instead of the standard CLI:
@@ -334,6 +310,15 @@ bash /home/oleg/extend_lerobot/lerobot/scripts/pico4/teleop_g1d.sh \
 ```
 
 This alternative asks for `r` then Enter and waits two seconds. It does not load the local JSON or consume the camera. Never run it concurrently with `lerobot-teleoperate`.
+
+## 8.1. Collect demonstrations instead of teleoperating
+
+Stop `lerobot-teleoperate` first. Keep the body/hand bridges, three-camera publisher,
+PICO service, and USB forwarding running. Use `lerobot-record` with the same shared
+config on the host. See [the recording command and resume workflow](HEAD_CAMERA.md#4-host-start-data-collection-with-lerobot-record)
+for an explicit local dataset root, all three video features, one-episode sessions,
+keyboard controls, and appending episodes after reconnecting. Recording sends robot
+commands immediately after setup, just like standard teleoperation.
 
 ## 9. Stop in order
 
@@ -353,7 +338,7 @@ The checked-in JSON sets the PICO input timeout to 0.5 seconds. The standalone p
 | Hand bridge times out | BrainCo hardware driver running; correct side/interface; six normalized positions arriving on the corresponding DDS state topic. The bridge cannot replace the hardware driver. |
 | Hand commands expire or feedback looks stale | Clock synchronization on both computers, network latency, and robot/host logs. |
 | Hands do not move | Hands present in the local JSON; command bridge started without `--read-only`; triggers tracked; ports 6002–6005 reachable. |
-| Camera timeout or wrong view | Camera IP in local JSON; actual V4L2 device; publisher on port 5555; `head_camera` stream name. |
+| Camera timeout or wrong view | All three camera addresses in JSON; actual V4L2 capture nodes; publisher on port 5555; matching `head_camera`, `left_wrist_camera`, and `right_wrist_camera` names. See the camera guide for the Teleimager ownership conflict. |
 | Camera shape mismatch | Match publisher width/height and JSON dimensions. For another resolution, update both. |
 | Address already in use / camera busy | Duplicate service or combined `--camera` server running alongside the standalone publisher. |
 | Pico SDK import/service error | Correct host environment, SDK installed into that environment, staged `.runtime` retained, exactly one PC service running. |

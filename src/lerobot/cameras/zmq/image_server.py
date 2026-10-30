@@ -185,9 +185,15 @@ class ImageServer:
 
 
 def main() -> None:
-    """Publish a head camera from the robot without starting the motor bridge."""
-    parser = argparse.ArgumentParser(description="Stream the robot head camera to a remote LeRobot client")
+    """Publish named cameras from the robot without starting the motor bridge."""
+    parser = argparse.ArgumentParser(description="Stream robot cameras to remote LeRobot clients")
     parser.add_argument("--device", default="4", help="Camera index or stable /dev/v4l/by-id/... device path")
+    parser.add_argument(
+        "--camera",
+        action="append",
+        metavar="NAME=DEVICE",
+        help="Named camera index/path; repeat for multiple cameras. Replaces the default --device head camera.",
+    )
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
@@ -196,18 +202,20 @@ def main() -> None:
     args = parser.parse_args()
     if min(args.fps, args.width, args.height) <= 0 or not 1 <= args.port <= 65535:
         parser.error("FPS and dimensions must be positive; port must be between 1 and 65535")
-    device = int(args.device) if args.device.isdecimal() else args.device
+    cameras = {}
+    for spec in args.camera or [f"head_camera={args.device}"]:
+        name, separator, device = spec.partition("=")
+        if not separator or not name.strip() or not device.strip():
+            parser.error("Each --camera must be NAME=DEVICE with a nonempty name and device")
+        if name in cameras:
+            parser.error(f"Duplicate camera name: {name}")
+        cameras[name] = {
+            "device_id": int(device) if device.isdecimal() else device,
+            "shape": [args.height, args.width],
+            "fourcc": args.fourcc,
+        }
     logging.basicConfig(level=logging.INFO)
-    config = {
-        "fps": args.fps,
-        "cameras": {
-            "head_camera": {
-                "device_id": device,
-                "shape": [args.height, args.width],
-                "fourcc": args.fourcc,
-            }
-        },
-    }
+    config = {"fps": args.fps, "cameras": cameras}
     ImageServer(config, port=args.port).run()
 
 

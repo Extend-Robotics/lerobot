@@ -1,6 +1,7 @@
 """Remote camera transport tests using synthetic images and a local ZMQ publisher."""
 
 import time
+from contextlib import ExitStack
 from queue import Queue
 from threading import Event, Thread
 
@@ -105,3 +106,90 @@ def test_missing_frames_do_not_refresh_latest_timestamp(publisher):
         assert frame[:, :, 2].mean() > 240
     finally:
         camera.disconnect()
+
+
+def test_three_named_views_remain_distinct(publisher):
+    port, message = publisher
+    names = ("head_camera", "left_wrist_camera", "right_wrist_camera")
+    images = {}
+    for channel, name in enumerate(names):
+        frame = np.zeros((24, 32, 3), dtype=np.uint8)
+        frame[:, :, channel] = 255
+        images[name] = encode_image(frame)
+    message[0] = {"images": images}
+    with ExitStack() as stack:
+        cameras = [
+            stack.enter_context(
+                ZMQCamera(ZMQCameraConfig(server_address="127.0.0.1", port=port, camera_name=name))
+            )
+            for name in names
+        ]
+        for channel, camera in enumerate(cameras):
+            frame = camera.async_read(timeout_ms=1000)
+            assert frame.shape == (24, 32, 3)
+            assert frame[:, :, channel].mean() > 240
+            assert np.delete(frame, channel, axis=2).mean() < 10
+
+
+def test_publisher_cli_accepts_named_devices(monkeypatch):
+    from unittest.mock import Mock
+
+    from lerobot.cameras.zmq import image_server
+
+    server = Mock()
+    monkeypatch.setattr(image_server, "ImageServer", server)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "image_server",
+            "--camera",
+            "head_camera=4",
+            "--camera",
+            "left_wrist_camera=/dev/v4l/by-path/left",
+            "--camera",
+            "right_wrist_camera=/dev/v4l/by-id/right",
+        ],
+    )
+    image_server.main()
+    cameras = server.call_args.args[0]["cameras"]
+    assert cameras["head_camera"]["device_id"] == 4
+    assert cameras["left_wrist_camera"]["device_id"] == "/dev/v4l/by-path/left"
+    assert cameras["right_wrist_camera"]["device_id"] == "/dev/v4l/by-id/right"
+    server.return_value.run.assert_called_once()
+
+
+def test_publisher_cli_preserves_single_head_mode(monkeypatch):
+    from unittest.mock import Mock
+
+    from lerobot.cameras.zmq import image_server
+
+    server = Mock()
+    monkeypatch.setattr(image_server, "ImageServer", server)
+    monkeypatch.setattr("sys.argv", ["image_server", "--device", "2"])
+    image_server.main()
+    assert server.call_args.args[0]["cameras"] == {
+        "head_camera": {"device_id": 2, "shape": [480, 640], "fourcc": "MJPG"}
+    }
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--camera", "head"],
+        ["--camera", "=0"],
+        ["--camera", "head="],
+        ["--camera", "head=0", "--camera", "head=2"],
+    ],
+)
+def test_publisher_cli_rejects_invalid_camera_mapping(monkeypatch, options):
+    from unittest.mock import Mock
+
+    from lerobot.cameras.zmq import image_server
+
+    server = Mock()
+    monkeypatch.setattr(image_server, "ImageServer", server)
+    monkeypatch.setattr("sys.argv", ["image_server", *options])
+    with pytest.raises(SystemExit) as error:
+        image_server.main()
+    assert error.value.code == 2
+    server.assert_not_called()

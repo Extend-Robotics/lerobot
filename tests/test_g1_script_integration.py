@@ -22,6 +22,17 @@ def test_shared_cli_configuration_decodes_for_teleop_and_record():
 
     path = Path(__file__).parents[1] / "configs/unitree_g1_pico.json"
     teleop = draccus.parse(TeleoperateConfig, config_path=path, args=["--fps=30"])
+    record_defaults = draccus.parse(
+        RecordConfig,
+        config_path=path,
+        args=["--dataset.repo_id=local/test", "--dataset.single_task=test"],
+    )
+    for config in (teleop, record_defaults):
+        assert set(config.robot.cameras) == {"head_camera", "left_wrist_camera", "right_wrist_camera"}
+        for name, camera in config.robot.cameras.items():
+            assert camera.type == "zmq" and camera.camera_name == name
+            assert camera.server_address == "192.168.123.164" and camera.port == 5555
+            assert (camera.width, camera.height, camera.fps) == (640, 480, 30)
     record = draccus.parse(
         RecordConfig,
         config_path=path,
@@ -81,12 +92,17 @@ def test_standard_record_saves_accepted_joint_targets(pipeline_state, with_camer
     }
     if with_camera:
         image = np.full((24, 32, 3), 127, dtype=np.uint8)
-        robot.get_observation.return_value = {**s.observation, "head_camera": image}
-        dataset.features["observation.images.head_camera"] = {
-            "dtype": "video",
-            "shape": image.shape,
-            "names": ["height", "width", "channels"],
+        images = {
+            name: image + i
+            for i, name in enumerate(("head_camera", "left_wrist_camera", "right_wrist_camera"))
         }
+        robot.get_observation.return_value = {**s.observation, **images}
+        for name in images:
+            dataset.features[f"observation.images.{name}"] = {
+                "dtype": "video",
+                "shape": image.shape,
+                "names": ["height", "width", "channels"],
+            }
     _, robot_processor, obs_processor = make_default_processors()
     record_loop(
         robot,
@@ -105,7 +121,8 @@ def test_standard_record_saves_accepted_joint_targets(pipeline_state, with_camer
     np.testing.assert_allclose(frame["action"], np.full(14, 0.12))
     np.testing.assert_array_equal(frame["observation.state"], np.zeros(14))
     if with_camera:
-        np.testing.assert_array_equal(frame["observation.images.head_camera"], image)
+        for name, image in images.items():
+            np.testing.assert_array_equal(frame[f"observation.images.{name}"], image)
 
 
 def test_rollout_keeps_g1_joint_state_actions_and_order(monkeypatch):
