@@ -349,14 +349,28 @@ config on the host:
 source /home/oleg/extend_lerobot/activate_unitree_g1.sh
 cd /home/oleg/extend_lerobot/lerobot
 /home/oleg/extend_lerobot/envs/unitree-g1/bin/lerobot-record \
-  --config_path=/home/oleg/extend_lerobot/lerobot/configs/unitree_g1_pico.json \
-  --dataset.repo_id=local/g1_pico_three_cameras \
-  --dataset.root=/home/oleg/extend_lerobot/lerobot/datasets/g1_pico_three_cameras \
-  --dataset.no_stamp=true \
-  --dataset.single_task="Pick up the object and place it in the box" \
-  --dataset.fps=30 --dataset.num_episodes=1 --dataset.episode_time_s=60 \
-  --dataset.push_to_hub=false --display_data=true --play_sounds=false
+  --config_path=/home/oleg/extend_lerobot/lerobot/configs/unitree_g1_pico_record.json
 ```
+
+The recording preset keeps all three cameras at 640×480 / 30 FPS and encodes
+straight to H.264 using this host's NVIDIA GPU (`h264_nvenc`, preset `p4`, QP 20,
+keyframes every 30 frames). Streaming avoids temporary PNG writes and most
+post-episode encoding work. A 60-frame queue per camera absorbs brief stalls
+(about 158 MiB of queued RGB pixels across three cameras); sustained encoder
+queue warnings or missed FPS still need investigation. Display and Hub upload
+are disabled.
+
+Each launch records **one episode**, up to 120 seconds. The G1 watchdog can latch
+a fault during saving gaps, so reconnect between episodes as described below.
+For ten demonstrations, run once, then repeat the same command with
+`--resume=true` nine times after resetting the scene. Do not run a recorder
+concurrently with teleoperation. Finish an episode early with Right Arrow / `n`;
+Escape / `q` saves and ends the session. Keep the terminal focused.
+
+Use a new dataset root on the first launch. If this dataset already exists, add
+`--resume=true` to append, or override both `--dataset.repo_id` and
+`--dataset.root` with a fresh name/path. The recording preset includes its own
+robot/teleop settings; apply future address or camera changes there too.
 
 See [the recording command and resume workflow](HEAD_CAMERA.md#4-host-start-data-collection-with-lerobot-record)
 for an explicit local dataset root, all three video features, one-episode sessions,

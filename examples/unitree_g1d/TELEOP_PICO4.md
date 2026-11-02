@@ -89,6 +89,11 @@ Arm-only mode advertises exactly 14 arm `.q` features and any configured hand
 values, but these are not part of the arm-only policy state. Recording and
 rollout retain the joint targets returned by `send_action()`, after command limits.
 
+Recordings also include `teleop.grip` (raw grip values) and `teleop.clutch`
+(effective arm-following states, 0 or 1), each ordered `[left, right]`. These are
+metadata, separate from policy state and robot actions. Use a new dataset when
+switching from recordings without these fields.
+
 ## Optional Revo2 hands
 
 Run the independent hand bridge on the robot:
