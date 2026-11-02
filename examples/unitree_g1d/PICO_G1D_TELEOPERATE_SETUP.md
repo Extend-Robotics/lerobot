@@ -121,6 +121,29 @@ of [Three-camera streaming and data collection](HEAD_CAMERA.md) to stop
 `teleimager.service`, reattach `uvcvideo`, identify each physical capture node,
 and start the named three-camera publisher on TCP 5555. Keep it running.
 
+**After a robot reboot, repeat camera recovery before starting the publisher.**
+The installed Teleimager service was enabled at boot and previously claimed the
+camera interfaces through `usbfs`, leaving no `/dev/video*` nodes. The confirmed
+fix was to stop Teleimager and reload `uvcvideo`; stopping Teleimager alone left
+the interfaces without a driver. With all local camera clients stopped, run
+on the robot:
+
+```bash
+sudo systemctl stop teleimager.service
+sudo modprobe -r uvcvideo
+sudo modprobe uvcvideo
+sudo udevadm settle
+ls -l /dev/video*
+lsusb -t
+lerobot-find-cameras opencv
+```
+
+Stop if a command fails. Expect Video interfaces to show `Driver=uvcvideo`,
+then verify the views in `outputs/captured_images`. This stops Teleimager for
+the current boot only; its startup setting is unchanged. See
+[camera recovery after reboot](HEAD_CAMERA.md#after-each-robot-reboot-recover-local-camera-devices)
+for failure diagnostics.
+
 The confirmed g1d mapping is head `/dev/video4`, left hand `/dev/video2`, and
 right hand `/dev/video0`. In the robot's activated `lerobot` environment:
 
@@ -133,6 +156,11 @@ python -m lerobot.cameras.zmq.image_server \
 ```
 
 Verify these device numbers again after USB reconnects or reboot.
+
+Wait for all three `Camera ... ready` messages. In another robot terminal, run
+`ss -ltnp 'sport = :5555'` and confirm a TCP listener before starting the host
+camera check. Restart this publisher after every robot reboot; successful
+camera discovery does not start image streaming.
 
 Run the body bridge in section 2 without `--camera`: its combined camera option
 only supplies a single head view. The three-camera publisher runs independently
@@ -315,7 +343,22 @@ This alternative asks for `r` then Enter and waits two seconds. It does not load
 
 Stop `lerobot-teleoperate` first. Keep the body/hand bridges, three-camera publisher,
 PICO service, and USB forwarding running. Use `lerobot-record` with the same shared
-config on the host. See [the recording command and resume workflow](HEAD_CAMERA.md#4-host-start-data-collection-with-lerobot-record)
+config on the host:
+
+```bash
+source /home/oleg/extend_lerobot/activate_unitree_g1.sh
+cd /home/oleg/extend_lerobot/lerobot
+/home/oleg/extend_lerobot/envs/unitree-g1/bin/lerobot-record \
+  --config_path=/home/oleg/extend_lerobot/lerobot/configs/unitree_g1_pico.json \
+  --dataset.repo_id=local/g1_pico_three_cameras \
+  --dataset.root=/home/oleg/extend_lerobot/lerobot/datasets/g1_pico_three_cameras \
+  --dataset.no_stamp=true \
+  --dataset.single_task="Pick up the object and place it in the box" \
+  --dataset.fps=30 --dataset.num_episodes=1 --dataset.episode_time_s=60 \
+  --dataset.push_to_hub=false --display_data=true --play_sounds=false
+```
+
+See [the recording command and resume workflow](HEAD_CAMERA.md#4-host-start-data-collection-with-lerobot-record)
 for an explicit local dataset root, all three video features, one-episode sessions,
 keyboard controls, and appending episodes after reconnecting. Recording sends robot
 commands immediately after setup, just like standard teleoperation.

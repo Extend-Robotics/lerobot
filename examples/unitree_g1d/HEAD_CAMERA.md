@@ -16,33 +16,70 @@ not synchronize the machines.
 
 ## 1. Robot: release cameras from Teleimager
 
-Use the updated checkout on both machines. On the robot:
+### After each robot reboot: recover local camera devices
+
+In the 29 October troubleshooting session, `teleimager.service` was enabled at
+boot and held the camera USB video interfaces with `Driver=usbfs`. OpenCV found
+zero cameras and `/dev/video*` was absent. Stopping Teleimager released the
+interfaces but left `Driver=` empty. **Stopping the service, then unloading and
+reloading `uvcvideo`, restored the cameras**, after which the operator confirmed
+all three views. Loading an already-loaded `uvcvideo` module alone did not fix it.
+
+`systemctl stop` only stops the current service instance; it does not prevent
+Teleimager from starting at the next boot. Repeat this recovery after reboot
+when using this LeRobot OpenCV publisher. The LeRobot publisher must also be
+started again; its terminal process does not survive a robot reboot.
+
+Use the updated checkout on both machines. Run the following **on the robot**,
+with the LeRobot image publisher, discovery/preview tools, and other local camera
+clients stopped. Stop if a command fails; do not force module removal.
 
 ```bash
 source /home/unitree/miniconda3/etc/profile.d/conda.sh
 conda activate lerobot
 cd /home/unitree/Documents/lerobot_unitree/lerobot
-python -m pip install -e '.[pyzmq-dep]'
+
 sudo systemctl stop teleimager.service
 sudo modprobe -r uvcvideo
 sudo modprobe uvcvideo
 sudo udevadm settle
+
+systemctl is-active teleimager.service
+ls -l /dev/video*
+lsusb -t
 lerobot-find-cameras opencv
 ls -l /dev/v4l/by-id/ /dev/v4l/by-path/
 ```
 
-The installed `teleimager.service` was observed claiming USB camera interfaces
-with `Driver=usbfs`, leaving no `/dev/video*` nodes. After stopping it, the
-interfaces were unbound; reloading `uvcvideo` restored camera access. Reload only
-while camera clients are stopped. This temporarily interrupts Teleimager streams;
-it does not disable its startup service. If cameras disappear again, check
-`systemctl status teleimager.service` and `lsusb -t`.
+Expect `inactive` from `systemctl is-active` (its nonzero exit status is normal
+for a stopped service), `/dev/video*` nodes, and `Driver=uvcvideo` on the camera
+Video interfaces in `lsusb -t`. Only run discovery once those nodes exist.
+This recovery interrupts Teleimager streams; it does not alter its boot setting
+or start any motor control. Use this environment's existing installation; on a
+fresh robot checkout, install the publisher dependency once with
+`python -m pip install -e '.[pyzmq-dep]'`.
 
 Inspect `outputs/captured_images` to identify the head and each wrist. Discovery
 may list multiple V4L2 nodes per physical camera; select three working color
 capture nodes for three distinct views. Prefer `/dev/v4l/by-id/...` paths. If the
 wrist cameras have duplicate IDs, use distinct `/dev/v4l/by-path/...` links tied
 to their USB ports. Numeric indices may change after reconnects or reboot.
+
+If video devices are still missing, collect these outputs before continuing:
+
+```bash
+systemctl status teleimager.service --no-pager -l
+lsusb
+lsusb -t
+sudo dmesg | grep -iE 'uvc|video|camera|usb' | tail -100
+```
+
+`Driver=usbfs` means a userspace owner still needs identifying: use current
+bus/device addresses from `lsusb` with
+`sudo fuser -v /dev/bus/usb/BBB/DDD`. Old USB addresses and PIDs can change after
+reboot. An empty Video-interface `Driver=` means the kernel camera driver has
+not reattached. A `modprobe -r` error saying the module is in use means another
+camera client must be stopped first.
 
 ## 2. Robot: publish all three cameras
 
@@ -77,6 +114,17 @@ Keep this terminal running. Wait for all three `Camera ... ready` messages. This
 publisher starts no motor control. Run the body bridge without `--camera`; do not
 also run Teleimager or a second publisher on these devices/port. The Teleimager
 wire protocol is not assumed compatible with this checkout's ZMQ receiver.
+
+In a second robot terminal, confirm the publisher is listening:
+
+```bash
+ss -ltnp 'sport = :5555'
+```
+
+Expect `LISTEN` on TCP 5555. If there is no listener, inspect the publisher
+terminal for an exit/error before attempting a host camera check. Visible local
+cameras and an active network publisher are separate checks: ping alone does
+not verify camera streaming.
 
 The publisher binds TCP 5555 on the robot. The host at `192.168.123.10` must be able
 to reach `192.168.123.164:5555` through the USB Ethernet link. Body/hand bridges use
@@ -198,8 +246,10 @@ sudo systemctl start teleimager.service
 ```
 
 - No video devices with `Driver=usbfs`: identify the owner using `sudo fuser -v /dev/bus/usb/BBB/DDD` with current addresses from `lsusb`.
+- Cameras disappear after robot reboot: repeat section 1; the enabled Teleimager service can reclaim them at boot, and the LeRobot publisher must be restarted.
 - Empty video-interface driver after stopping Teleimager: reload `uvcvideo` as above.
 - Device busy or port already in use: check for Teleimager, another publisher, or the body bridge's `--camera` mode.
+- Host connection refused on TCP 5555: check `ss -ltnp 'sport = :5555'` on the robot and the publisher's terminal; camera discovery alone does not start the server.
 - Timeout on just one named camera: verify its exact `--camera` name and physical device mapping.
 - Shape mismatch: match publisher dimensions with all host camera configs.
 - Changed robot address: update all three `server_address` values; changing `robot.robot_ip` alone does not change camera addresses.
