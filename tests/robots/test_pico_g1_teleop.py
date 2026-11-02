@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from lerobot.configs import PipelineFeatureType
+from lerobot.datasets.feature_utils import validate_frame
 from lerobot.processor import make_default_processors
 from lerobot.teleoperators.bi_pico4.g1_processor import ARM_KEYS, POSE_FIELDS, PicoToG1Joints
 from lerobot.teleoperators.bi_pico4.xr_mapping import map_xr_wrist_targets
@@ -182,7 +183,12 @@ def test_clutch_hysteresis_and_reset(pipeline_state):
         s.action["left.grip"] = grip
         result = s.processor((s.action, s.observation))
         assert result[ARM_KEYS[0]] == (0.2 if expected else 0.0)
+        frame = s.step.recording_frame
+        np.testing.assert_allclose(frame["teleop.grip"], [grip, 0.0])
+        np.testing.assert_array_equal(frame["teleop.clutch"], [expected, False])
+        validate_frame({**frame, "task": "test"}, s.step.recording_features)
     s.processor.reset()
+    np.testing.assert_array_equal(s.step.recording_frame["teleop.clutch"], [0, 0])
     s.solver.smooth_filter.reset.assert_called_once()
     s.observation = dict.fromkeys(ARM_KEYS, 0.1)
     assert s.processor((s.action, s.observation)) == dict.fromkeys(ARM_KEYS, 0.1)

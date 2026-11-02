@@ -370,6 +370,8 @@ def record_loop(
             with timer.section("record"):
                 action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
                 frame = {**observation_frame, **action_frame, "task": single_task}
+                for step in teleop_action_processor.steps:
+                    frame.update(getattr(step, "recording_frame", {}))
                 dataset.add_frame(frame)
 
         if display_data:
@@ -433,6 +435,9 @@ def record(
             use_videos=cfg.dataset.video,
         ),
     )
+
+    for step in teleop_action_processor.steps:
+        dataset_features.update(getattr(step, "recording_features", {}))
 
     dataset = None
     listener = None

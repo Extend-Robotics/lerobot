@@ -29,6 +29,7 @@ class PicoToG1Joints(RobotActionProcessorStep):
     grip_enable_threshold: float = 0.5
     grip_disable_threshold: float = 0.3
     _enabled: tuple[bool, bool] = field(default=(False, False), init=False, repr=False)
+    _grips: tuple[float, float] = field(default=(0.0, 0.0), init=False, repr=False)
     _held_q: np.ndarray | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -39,8 +40,24 @@ class PicoToG1Joints(RobotActionProcessorStep):
 
     def reset(self) -> None:
         self._enabled = (False, False)
+        self._grips = (0.0, 0.0)
         self._held_q = None
         self.solver.smooth_filter.reset()
+
+    @property
+    def recording_features(self) -> dict[str, dict[str, Any]]:
+        return {
+            key: {"dtype": "float32", "shape": (2,), "names": ["left", "right"]}
+            for key in ("teleop.grip", "teleop.clutch")
+        }
+
+    @property
+    def recording_frame(self) -> dict[str, np.ndarray]:
+        """Metadata from the last successful processing tick, outside robot actions."""
+        return {
+            "teleop.grip": np.array(self._grips, dtype=np.float32),
+            "teleop.clutch": np.array(self._enabled, dtype=np.float32),
+        }
 
     def action(self, action: RobotAction) -> RobotAction:
         began = time.monotonic()
@@ -101,6 +118,7 @@ class PicoToG1Joints(RobotActionProcessorStep):
                 raise ValueError("PICO triggers must be in [0, 1]")
             result[key] = trigger
         self._enabled = enabled
+        self._grips = (float(grips[0]), float(grips[1]))
         self._held_q = held_q
         return result
 
