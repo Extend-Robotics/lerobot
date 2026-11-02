@@ -196,6 +196,7 @@ unitree_g1 = [
     "lerobot[matplotlib-dep]",
     "lerobot[pygame-dep]",
 ]
+# PICO SDK is installed separately using scripts/pico4/install_sdk.sh.
 # reachy2-sdk caps grpcio<=1.73.1 and protobuf<=6.32.0; quarantined here so downstream users aren't held back. reachy2-sdk is unlikely to release new versions.
 reachy2 = [
     "reachy2_sdk>=1.0.15,<1.1.0",
@@ -570,7 +571,8 @@ ignore_missing_imports = true
 follow_imports = "skip"
 # Paths the hook checks as a whole (pass_filenames: false); keep its `files` pattern in sync.
 files = ["src/lerobot", "scripts", "utils", "conftest.py", "setup.py"]
-exclude = ['_pb2(_grpc)?\.py$']
+# The native PICO SDK is a separate distribution with its own setup module.
+exclude = ['_pb2(_grpc)?\.py$', 'scripts/pico4/sdk/setup\.py$']
 exclude_gitignore = true
 warn_redundant_casts = true
 extra_checks = true

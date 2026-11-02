@@ -140,6 +140,8 @@ _liger_kernel_available = is_package_available("liger-kernel", import_name="lige
 _kernels_available = is_package_available("kernels")
 
 # Hardware SDKs
+# Native PICO SDK is built using scripts/pico4/install_sdk.sh.
+_pico4_sdk_available = is_package_available("xensevr-pc-service-sdk", import_name="xensevr_pc_service_sdk")
 _serial_available = is_package_available("pyserial", import_name="serial")
 _deepdiff_available = is_package_available("deepdiff")
 _dynamixel_sdk_available = is_package_available("dynamixel-sdk", import_name="dynamixel_sdk")

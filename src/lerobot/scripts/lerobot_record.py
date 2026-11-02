@@ -137,6 +137,7 @@ from lerobot.teleoperators import (  # noqa: F401
     TeleoperatorConfig,
     bi_openarm_leader,
     bi_openarm_mini,
+    bi_pico4,
     bi_rebot_102_leader,
     bi_so_leader,
     homunculus,
@@ -145,6 +146,7 @@ from lerobot.teleoperators import (  # noqa: F401
     omx_leader,
     openarm_leader,
     openarm_mini,
+    pico4,
     reachy2_teleoperator,
     rebot_102_leader,
     so_leader,
@@ -318,7 +320,7 @@ def record_loop(
             # Get action from teleop
             if isinstance(teleop, Teleoperator):
                 act = teleop.get_action()
-                if robot.name == "unitree_g1":
+                if teleop.name == "unitree_g1":
                     teleop.send_feedback(obs)
 
                 # Applies a pipeline to the raw teleop action, default is IdentityProcessor
@@ -360,12 +362,16 @@ def record_loop(
             # so action actually sent is saved in the dataset. action = postprocessor.process(action)
             # TODO(steven, pepijn, adil): we should use a pipeline step to clip the action, so the sent action is the action that we input to the robot.
             _sent_action = robot.send_action(robot_action_to_send)
+            if isinstance(_sent_action, dict) and _sent_action.keys() == action_values.keys():
+                action_values = _sent_action
 
         # Write to dataset
         if dataset is not None:
             with timer.section("record"):
                 action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
                 frame = {**observation_frame, **action_frame, "task": single_task}
+                for step in teleop_action_processor.steps:
+                    frame.update(getattr(step, "recording_frame", {}))
                 dataset.add_frame(frame)
 
         if display_data:
@@ -410,7 +416,7 @@ def record(
         or robot_action_processor is None
         or robot_observation_processor is None
     ):
-        _t, _r, _o = make_default_processors()
+        _t, _r, _o = make_default_processors(robot, teleop)
         teleop_action_processor = teleop_action_processor or _t
         robot_action_processor = robot_action_processor or _r
         robot_observation_processor = robot_observation_processor or _o
@@ -429,6 +435,9 @@ def record(
             use_videos=cfg.dataset.video,
         ),
     )
+
+    for step in teleop_action_processor.steps:
+        dataset_features.update(getattr(step, "recording_features", {}))
 
     dataset = None
     listener = None

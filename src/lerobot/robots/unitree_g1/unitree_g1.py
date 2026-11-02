@@ -20,7 +20,7 @@ import importlib
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -30,6 +30,7 @@ from lerobot.cameras import DepthCamera, make_cameras_from_configs
 from lerobot.lerobot_types import RobotAction, RobotObservation
 from lerobot.utils.import_utils import _unitree_sdk_available, require_package
 
+from ..brainco_revo2 import BraincoRevo2Hand
 from ..robot import Robot
 from .config_unitree_g1 import UnitreeG1Config
 from .g1_kinematics import G1_29_ArmIK
@@ -160,6 +161,19 @@ class UnitreeG1(Robot):
 
         self.config = config
         self.control_dt = config.control_dt
+        self.hands: dict[str, BraincoRevo2Hand] = {}
+        for side in ("left", "right"):
+            hand_config = getattr(config, f"{side}_hand")
+            if hand_config is not None:
+                self.hands[side] = BraincoRevo2Hand(
+                    replace(
+                        hand_config,
+                        side=side,
+                        robot_ip=config.robot_ip,
+                        read_only=config.read_only or hand_config.read_only,
+                        id=hand_config.id or f"{config.id or 'g1'}_{side}_hand",
+                    )
+                )
 
         # Initialize cameras config (ZMQ-based) - actual connection in connect()
         self._cameras = make_cameras_from_configs(config.cameras)
@@ -183,7 +197,8 @@ class UnitreeG1(Robot):
         # Initialize state variables
         self.sim_env = None
         self._env_wrapper: dict[str, dict[int, gym.vector.VectorEnv]] | None = None
-        self._lowstate = None
+        self._lowstate: G1_29_LowState | None = None
+        self._lowstate_received_at: float | None = None
         self._lowstate_lock = threading.Lock()
         # Guards the shared lowcmd message: the controller thread, send_action(), reset() and
         # the shutdown path all publish through it, and a torn update still carries a valid CRC.
@@ -195,6 +210,12 @@ class UnitreeG1(Robot):
         self.subscribe_thread: threading.Thread | None = None
 
         self.arm_ik = G1_29_ArmIK() if config.gravity_compensation else None
+        self._arm_target: RobotAction | None = None
+        self._arm_target_at = 0.0
+        self._arm_error: Exception | None = None
+        self._arm_thread: threading.Thread | None = None
+        self._hand_command_at: float | None = None
+        self._hand_command: RobotAction = {}
 
         # Controller loaded dynamically
         self.controller: RobotController | None = make_robot_controller(config.controller)
@@ -241,6 +262,7 @@ class UnitreeG1(Robot):
 
                 with self._lowstate_lock:
                     self._lowstate = lowstate
+                    self._lowstate_received_at = time.monotonic()
 
             current_time = time.time()
             all_t_elapsed = current_time - start_time
@@ -253,9 +275,24 @@ class UnitreeG1(Robot):
         kp: np.ndarray | list[float] | None = None,
         kd: np.ndarray | list[float] | None = None,
         tau: np.ndarray | list[float] | None = None,
+        *,
+        passivate_body: bool = False,
     ) -> None:  # writes robot command whenever requested
+        if self.config.read_only:
+            raise PermissionError("Robot command publishing is disabled in read-only mode")
         with self._lowcmd_lock:
             for motor in G1_29_JointIndex:
+                if self.config.arm_commands_only and motor.value < 15:
+                    cmd = self.msg.motor_cmd[motor.value]
+                    # Retain configured waist support at its connect-time target,
+                    # while rejecting body targets from the teleoperation caller.
+                    hold_waist = motor.value >= 12 and not passivate_body
+                    cmd.kp = self.kp[motor.value] if hold_waist else 0.0
+                    cmd.kd = self.kd[motor.value] if hold_waist else 0.0
+                    cmd.tau = cmd.qd = 0.0
+                    if not np.isfinite(cmd.q):
+                        cmd.q = 0.0
+                    continue
                 key = f"{motor.name}.q"
                 if key in action:
                     self.msg.motor_cmd[motor.value].q = action[key]
@@ -289,10 +326,25 @@ class UnitreeG1(Robot):
         # action space over to the controller.
         controller_ft = getattr(self.controller, "observation_ft", None)
         proprio_ft = self._motors_ft if controller_ft is None else dict(controller_ft)
-        return {**proprio_ft, **self._cameras_ft}
+        return {**proprio_ft, **self._cameras_ft, **self._hand_features}
+
+    @property
+    def _hand_features(self) -> dict[str, type]:
+        return {
+            f"{side}_hand.{key}": value
+            for side, hand in self.hands.items()
+            for key, value in hand.action_features.items()
+        }
 
     @cached_property
     def action_features(self) -> dict[str, type]:
+        return {**self._body_action_features, **self._hand_features}
+
+    @property
+    def _body_action_features(self) -> dict[str, type]:
+        if self.config.arm_commands_only:
+            return {f"{joint.name}.q": float for joint in G1_29_JointArmIndex}
+
         # No controller configured at all: raw 29-DoF joint teleop.
         if self.controller is None:
             return {f"{G1_29_JointIndex(motor).name}.q": float for motor in G1_29_JointIndex}
@@ -354,13 +406,31 @@ class UnitreeG1(Robot):
             time.sleep(sleep_time)
 
     def calibrate(self) -> None:
-        # TODO: implement g1_29 calibration
-        pass
+        for hand in self.hands.values():
+            hand.calibrate()
 
     def configure(self) -> None:
-        pass
+        for hand in self.hands.values():
+            hand.configure()
 
-    def connect(self, calibrate: bool = True) -> None:  # connect to DDS
+    def connect(self, calibrate: bool = True) -> None:
+        if self.is_connected:
+            raise ConnectionError("UnitreeG1 is already connected")
+        self._shutdown_event.clear()
+        self._arm_target = None
+        self._arm_error = None
+        self._hand_command = {}
+        self._hand_command_at = None
+        try:
+            # Establish hand feedback before body controllers can start commanding.
+            for hand in self.hands.values():
+                hand.connect(calibrate)
+            self._connect_body(calibrate)
+        except BaseException:
+            self.disconnect()
+            raise
+
+    def _connect_body(self, calibrate: bool = True) -> None:  # connect to DDS
         # Initialize DDS channel and simulation environment
         if self.config.is_simulation:
             from lerobot.envs import make_env
@@ -373,8 +443,9 @@ class UnitreeG1(Robot):
             self._ChannelFactoryInitialize(0, config=self.config)
 
         # Initialize direct motor control interface
-        self.lowcmd_publisher = self._ChannelPublisher(kTopicLowCommand_Debug, hg_LowCmd)
-        self.lowcmd_publisher.Init()
+        if not self.config.read_only:
+            self.lowcmd_publisher = self._ChannelPublisher(kTopicLowCommand_Debug, hg_LowCmd)
+            self.lowcmd_publisher.Init()
         self.lowstate_subscriber = self._ChannelSubscriber(kTopicLowState, hg_LowState)
         self.lowstate_subscriber.Init()
 
@@ -410,7 +481,7 @@ class UnitreeG1(Robot):
 
         # Prefer the active controller's gains (e.g. SONIC loads kp/kd from its ONNX);
         # otherwise fall back to the config defaults.
-        if self.controller is not None and hasattr(self.controller, "kp"):
+        if self.controller is not None and hasattr(self.controller, "kp") and hasattr(self.controller, "kd"):
             self.kp = np.array(self.controller.kp, dtype=np.float32)
             self.kd = np.array(self.controller.kd, dtype=np.float32)
         else:
@@ -435,21 +506,45 @@ class UnitreeG1(Robot):
             fps = int(1.0 / self.controller.control_dt)
             logger.info(f"Controller thread started ({fps}Hz)")
 
+        if self.config.arm_commands_only and not self.config.read_only:
+            self._arm_thread = threading.Thread(target=self._arm_loop, name="g1-arm-publisher", daemon=True)
+            self._arm_thread.start()
+
     def _send_zero_torque(self) -> None:
         """Send a zero-gain command to make joints passive before shutting down."""
+        if self.config.read_only:
+            return
         try:
             with self._lowstate_lock:
                 lowstate = self._lowstate
             if lowstate is None:
                 return
-            action = {f"{motor.name}.q": lowstate.motor_state[motor.value].q for motor in G1_29_JointIndex}
-            zero_gains = np.zeros(29, dtype=np.float32)
-            self.publish_lowcmd(action, kp=zero_gains, kd=zero_gains, tau=zero_gains)
+            action = {
+                f"{motor.name}.q": (
+                    float(lowstate.motor_state[motor.value].q)
+                    if np.isfinite(lowstate.motor_state[motor.value].q)
+                    else 0.0
+                )
+                for motor in G1_29_JointIndex
+            }
+            zero_gains: np.ndarray = np.zeros(29, dtype=np.float32)
+            self.publish_lowcmd(action, kp=zero_gains, kd=zero_gains, tau=zero_gains, passivate_body=True)
             logger.info("Sent zero-torque command for safe shutdown")
         except Exception as e:
             logger.warning(f"Failed to send zero-torque on disconnect: {e}")
 
     def disconnect(self):
+        self._shutdown_event.set()
+        if self._arm_thread is not None:
+            self._arm_thread.join(timeout=2.0)
+        with self._control_lock:
+            self._arm_target = None
+        # Hand disconnect never sends a gesture. Close every hand even if one fails.
+        for side, hand in self.hands.items():
+            try:
+                hand.disconnect()
+            except Exception:
+                logger.exception("Failed to disconnect %s Revo2 hand", side)
         # Signal threads to stop and unblock any waits
         self._shutdown_event.set()
 
@@ -494,9 +589,15 @@ class UnitreeG1(Robot):
 
         # Disconnect cameras
         for cam in self._cameras.values():
-            cam.disconnect()
+            if cam.is_connected:
+                cam.disconnect()
+        with self._lowstate_lock:
+            self._lowstate = None
+            self._lowstate_received_at = None
 
     def get_observation(self) -> RobotObservation:
+        if self._arm_error is not None:
+            raise RuntimeError("Arm publisher failed; reconnect before continuing") from self._arm_error
         with self._lowstate_lock:
             lowstate = self._lowstate
         if lowstate is None:
@@ -553,9 +654,146 @@ class UnitreeG1(Robot):
             if isinstance(cam, DepthCamera) and cam.use_depth:
                 obs[f"{cam_name}_depth"] = cam.read_latest_depth()
 
+        for side, hand in self.hands.items():
+            obs.update({f"{side}_hand.{key}": value for key, value in hand.get_observation().items()})
         return obs
 
+    def state_age_s(self) -> float:
+        """Return monotonic age of the last received robot state, or infinity."""
+        with self._lowstate_lock:
+            received_at = self._lowstate_received_at
+        return float("inf") if received_at is None else time.monotonic() - received_at
+
+    def _check_arm_state(self) -> np.ndarray:
+        if self._arm_error is not None:
+            raise RuntimeError("Arm publisher failed; reconnect before sending commands") from self._arm_error
+        if self.state_age_s() > self.config.command_timeout_s:
+            raise TimeoutError("Robot feedback is stale")
+        with self._lowstate_lock:
+            lowstate = self._lowstate
+            if lowstate is None:
+                raise ConnectionError("No robot feedback available")
+            q = np.array([lowstate.motor_state[joint].q for joint in G1_29_JointArmIndex], dtype=float)
+        if not np.isfinite(q).all():
+            raise ValueError("Nonfinite arm feedback")
+        return q
+
+    def _publish_arm_target(self) -> None:
+        """Repeat the accepted joint target; never advance beyond the recorded action."""
+        with self._control_lock:
+            if self._shutdown_event.is_set() or self._arm_target is None:
+                return
+            measured = self._check_arm_state()
+            if time.monotonic() - self._arm_target_at > self.config.command_timeout_s:
+                raise TimeoutError("Arm command stream expired")
+            tau = np.zeros(NUM_MOTORS)
+            if self.arm_ik is not None:
+                arm_tau = np.asarray(self.arm_ik.solve_tau(measured), dtype=float)
+                if arm_tau.shape != (14,) or not np.isfinite(arm_tau).all():
+                    raise ValueError("Invalid arm gravity torques")
+                for joint, value in zip(G1_29_JointArmIndex, arm_tau, strict=True):
+                    tau[joint.value] = value
+            self.publish_lowcmd(self._arm_target, tau=tau)
+
+    def _arm_loop(self) -> None:
+        try:
+            while not self._shutdown_event.is_set():
+                began = time.monotonic()
+                self._publish_arm_target()
+                self._shutdown_event.wait(max(0.0, self.control_dt - (time.monotonic() - began)))
+        except Exception as exc:
+            with self._control_lock:
+                self._arm_error = exc
+                self._arm_target = None
+                self._send_zero_torque()
+
     def send_action(self, action: RobotAction) -> RobotAction:
+        if self.config.read_only:
+            raise PermissionError("Robot command publishing is disabled in read-only mode")
+        if self.config.arm_commands_only:
+            return self._send_arm_action(action)
+        hand_actions: dict[str, RobotAction] = {}
+        body_action: RobotAction = {}
+        for key, value in action.items():
+            if key.startswith(("left_hand.", "right_hand.")):
+                side, hand_key = key.split("_hand.", 1)
+                if side not in self.hands:
+                    raise ValueError(f"No {side} hand is configured")
+                hand_actions.setdefault(side, {})[hand_key] = value
+            else:
+                body_action[key] = value
+        # Validate all hand actions before any component moves. Hand features are
+        # independent of locomotion and whole-body controller spaces.
+        for side, targets in hand_actions.items():
+            hand_actions[side] = self.hands[side].prepare_action(targets)
+        sent = self._send_body_action(body_action) if body_action else {}
+        for side, targets in hand_actions.items():
+            result = self.hands[side].send_action(targets)
+            sent.update({f"{side}_hand.{key}": value for key, value in result.items()})
+        return sent
+
+    def _send_arm_action(self, action: RobotAction) -> RobotAction:
+        """Validate and bound a complete arm/hand action before accepting any writes."""
+        with self._control_lock:
+            measured = self._check_arm_state()
+            if (
+                self._arm_target is not None
+                and time.monotonic() - self._arm_target_at > self.config.command_timeout_s
+            ):
+                raise TimeoutError("Arm command stream expired; reconnect before sending commands")
+            if self._shutdown_event.is_set():
+                raise ConnectionError("Robot is disconnecting")
+            if set(action) != set(self.action_features):
+                raise ValueError("Expected all configured arm and hand joint targets")
+            if not all(np.isfinite(value) for value in action.values()):
+                raise ValueError("Joint targets must be finite")
+            keys = [f"{joint.name}.q" for joint in G1_29_JointArmIndex]
+            requested = np.array([action[key] for key in keys], dtype=float)
+            delta = requested - measured
+            scale = max(1.0, float(np.max(np.abs(delta))) / self.config.arm_max_step)
+            bounded = dict(zip(keys, (measured + delta / scale).tolist(), strict=True))
+            now = time.monotonic()
+            dt = (
+                min(self.config.command_timeout_s, now - self._hand_command_at)
+                if self._hand_command_at is not None
+                else self.control_dt
+            )
+            hand_commands = {}
+            for side, hand in self.hands.items():
+                observation = hand.get_observation()
+                targets = {}
+                for key in hand.action_features:
+                    name = f"{side}_hand.{key}"
+                    previous = self._hand_command.get(name, observation[key])
+                    if previous is None or not np.isfinite(previous):
+                        raise ValueError("Nonfinite hand feedback")
+                    previous = float(previous)
+                    step = self.config.hand_max_speed * dt
+                    targets[key] = float(np.clip(action[name], previous - step, previous + step))
+                hand_commands[side] = hand.prepare_action(targets)
+            # Recheck expiry after hand transport calls, before any component is commanded.
+            self._check_arm_state()
+            if time.monotonic() - now > self.config.command_timeout_s:
+                raise TimeoutError("Hand validation exceeded command deadline")
+            try:
+                for side, targets in hand_commands.items():
+                    result = self.hands[side].send_action(targets)
+                    bounded.update({f"{side}_hand.{key}": value for key, value in result.items()})
+                self._check_arm_state()
+                if time.monotonic() - now > self.config.command_timeout_s:
+                    raise TimeoutError("Hand dispatch exceeded command deadline")
+                self._arm_target = {key: bounded[key] for key in keys}
+                self._arm_target_at = time.monotonic()
+                self._hand_command = {key: value for key, value in bounded.items() if "_hand." in key}
+                self._hand_command_at = self._arm_target_at
+            except Exception as exc:
+                self._arm_error = exc
+                self._arm_target = None
+                self._send_zero_torque()
+                raise
+            return bounded
+
+    def _send_body_action(self, action: RobotAction) -> RobotAction:
         action_to_publish = action
         if self.controller is not None:
             # Controller thread owns legs/waist. Here we only update joystick inputs
@@ -602,17 +840,19 @@ class UnitreeG1(Robot):
 
     @property
     def is_calibrated(self) -> bool:
-        return True
+        return all(hand.is_calibrated for hand in self.hands.values())
 
     @property
     def is_connected(self) -> bool:
         with self._lowstate_lock:
-            return self._lowstate is not None
+            body_connected = self._lowstate is not None
+        return body_connected and all(hand.is_connected for hand in self.hands.values())
 
     @property
     def _motors_ft(self) -> dict[str, type]:
         """Joint positions for all 29 joints."""
-        return {f"{G1_29_JointIndex(motor).name}.q": float for motor in G1_29_JointIndex}
+        joints = G1_29_JointArmIndex if self.config.arm_commands_only else G1_29_JointIndex
+        return {f"{joint.name}.q": float for joint in joints}
 
     @property
     def cameras(self) -> dict:
@@ -636,6 +876,7 @@ class UnitreeG1(Robot):
         # Hold control authority for the whole sweep. Otherwise the controller thread keeps
         # publishing its own targets throughout, and the robot is driven by two writers at once.
         with self._control_lock:
+            self._arm_target = None
             if self.config.is_simulation and self.sim_env is not None:
                 self.sim_env.reset()
                 self.publish_lowcmd(

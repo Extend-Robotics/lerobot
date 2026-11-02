@@ -1,3 +1,23 @@
+# Server side
+
+For the current USB headset + USB Ethernet robot setup (`192.168.123.164`), see
+[the complete setup guide](PICO_G1D_TELEOPERATE_SETUP.md).
+For combined PICO arm control, see [PICO to G1-D teleoperation](TELEOP_PICO4.md).
+For head and both wrist camera streaming, host verification, and `lerobot-record` collection commands, see [Three-camera data collection](HEAD_CAMERA.md).
+
+ssh unitree@192.168.123.164
+
+1
+
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate lerobot
+
+
+(unitree_lerobot) unitree@ubuntu:~$ cd Documents/lerobot_unitree/lerobot
+python src/lerobot/robots/unitree_g1/run_g1_server.py
+
+
+
 # Read G1-D upper-body state
 
 This is the read-only integration milestone. It subscribes directly to `rt/lowstate`
@@ -38,3 +58,7 @@ with robot:
 The class uses the existing dynamic robot factory. Recording/teleoperation CLI
 registration is outside this read-only milestone. Hardware validation is still
 required; unit tests use mocked SDK subscriptions.
+
+## Offline arm IK
+
+See [the arm IK guide](IK_README.md) for torso-relative wrist targets using the existing G1 solver, without connecting to a robot.
