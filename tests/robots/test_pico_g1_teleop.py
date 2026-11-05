@@ -61,11 +61,57 @@ def pipeline_state(monkeypatch):
 def test_raw_tracking_becomes_only_joint_targets(pipeline_state):
     s = pipeline_state
     result = s.processor((s.action, s.observation))
-    assert result == dict.fromkeys(ARM_KEYS, 0.2)
+    assert result == s.observation
     left, right, measured, _ = s.solver.solve_ik.call_args.args
-    np.testing.assert_allclose(left[:3, 3], [0.55, 0.2, 0.15])
-    np.testing.assert_allclose(right[:3, 3], [0.55, -0.2, 0.15])
+    np.testing.assert_allclose(left, np.eye(4))
+    np.testing.assert_allclose(right, np.eye(4))
     np.testing.assert_array_equal(measured, np.zeros(14))
+    assert s.processor((s.action, s.observation)) == dict.fromkeys(ARM_KEYS, 0.2)
+
+
+def test_clutch_keeps_position_and_orientation_offsets_until_reengagement(pipeline_state):
+    s = pipeline_state
+    left = np.eye(4)
+    left[:3, :3] = [[0, -1, 0], [1, 0, 0], [0, 0, 1]]
+    left[:3, 3] = [0.3, 0.2, 0.4]
+    right = np.eye(4)
+    right[:3, 3] = [0.4, -0.2, 0.3]
+    s.solver.forward_kinematics.return_value = (left, right)
+    s.observation = dict.fromkeys(ARM_KEYS, 0.1)
+    assert s.processor((s.action, s.observation)) == s.observation
+    poses = {
+        name: np.array([s.action[f"{name}.{field}"] for field in POSE_FIELDS])
+        for name in ("head", "left", "right")
+    }
+    initial_controller = map_xr_wrist_targets(poses)[0]
+    # Move and rotate the controller; the robot feedback is deliberately unchanged.
+    s.action["left.x"] += 0.1
+    s.action["left.qy"] = np.sin(np.pi / 8)
+    s.action["left.qw"] = np.cos(np.pi / 8)
+    poses["left"] = np.array([s.action[f"left.{field}"] for field in POSE_FIELDS])
+    moved_controller = map_xr_wrist_targets(poses)[0]
+    s.processor((s.action, s.observation))
+    target, other = s.solver.solve_ik.call_args.args[:2]
+    np.testing.assert_allclose(
+        target[:3, 3], left[:3, 3] + moved_controller[:3, 3] - initial_controller[:3, 3]
+    )
+    np.testing.assert_allclose(
+        target[:3, :3], moved_controller[:3, :3] @ initial_controller[:3, :3].T @ left[:3, :3]
+    )
+    np.testing.assert_allclose(other, right)
+    # A new engagement anchors to fresh feedback, independently of the other arm.
+    s.action["left.grip"] = 0.0
+    s.processor((s.action, s.observation))
+    new_left = left.copy()
+    new_left[:3, 3] += [0.05, 0.0, 0.1]
+    s.solver.forward_kinematics.return_value = (new_left, right)
+    s.action["left.x"] += 0.3
+    s.action["left.grip"] = 1.0
+    s.processor((s.action, s.observation))
+    np.testing.assert_allclose(s.solver.solve_ik.call_args.args[0], new_left, atol=1e-12)
+    s.processor.reset()
+    assert s.step._position_offsets == [None, None]
+    assert s.step._rotation_offsets == [None, None]
 
 
 @pytest.mark.parametrize("failure", ["failed", "nan", "shape", "limits"])
@@ -125,7 +171,7 @@ def test_default_factory_selects_joint_processor(monkeypatch, pipeline_state):
         ),
     )
     pipeline, _, _ = make_default_processors(robot, teleop)
-    assert pipeline((s.action, s.observation)) == dict.fromkeys(ARM_KEYS, 0.2)
+    assert pipeline((s.action, s.observation)) == s.observation
     assert pipeline.steps[0].grip_enable_threshold == 0.7
     assert pipeline.steps[0].grip_disable_threshold == 0.2
     teleop.config.output_mode = "cartesian"
@@ -151,13 +197,8 @@ def test_released_arm_holds_measured_position_independently(pipeline_state, side
     np.testing.assert_array_equal(s.solver.solve_ik.call_args.args[index], np.eye(4))
     s.action[f"{side}.grip"] = 1.0
     result = s.processor((s.action, s.observation))
-    poses = {
-        name: np.array([s.action[f"{name}.{field}"] for field in POSE_FIELDS])
-        for name in ("head", "left", "right")
-    }
-    expected = map_xr_wrist_targets(poses)
-    np.testing.assert_allclose(s.solver.solve_ik.call_args.args[index], expected[index])
-    assert all(result[key] == 0.2 for key in keys)
+    np.testing.assert_allclose(s.solver.solve_ik.call_args.args[index], np.eye(4))
+    assert all(result[key] == 0.05 for key in keys)
 
 
 def test_both_released_skip_ik_keep_hands_and_validate_freshness(pipeline_state):
@@ -180,9 +221,10 @@ def test_clutch_hysteresis_and_reset(pipeline_state):
     s = pipeline_state
     s.action["right.grip"] = 0.0
     for grip, expected in [(0.5, False), (0.51, True), (0.4, True), (0.3, False), (0.4, False)]:
+        previously_enabled = s.step._enabled[0]
         s.action["left.grip"] = grip
         result = s.processor((s.action, s.observation))
-        assert result[ARM_KEYS[0]] == (0.2 if expected else 0.0)
+        assert result[ARM_KEYS[0]] == (0.2 if expected and previously_enabled else 0.0)
         frame = s.step.recording_frame
         np.testing.assert_allclose(frame["teleop.grip"], [grip, 0.0])
         np.testing.assert_array_equal(frame["teleop.clutch"], [expected, False])

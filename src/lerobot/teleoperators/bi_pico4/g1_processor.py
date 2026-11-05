@@ -21,7 +21,11 @@ POSE_FIELDS = ("x", "y", "z", "qx", "qy", "qz", "qw")
 @ProcessorStepRegistry.register("pico_to_g1_joints")
 @dataclass
 class PicoToG1Joints(RobotActionProcessorStep):
-    """Apply Unitree XR mapping and IK; retain only arm/hand joint actions."""
+    """Apply clutch-relative XR mapping and IK; retain only arm/hand joint actions.
+
+    Each grip engagement captures position and orientation offsets from the
+    measured robot wrist. Offsets remain fixed until that arm re-engages.
+    """
 
     hand_features: tuple[str, ...] = ()
     timeout_s: float = 0.5
@@ -31,6 +35,12 @@ class PicoToG1Joints(RobotActionProcessorStep):
     _enabled: tuple[bool, bool] = field(default=(False, False), init=False, repr=False)
     _grips: tuple[float, float] = field(default=(0.0, 0.0), init=False, repr=False)
     _held_q: np.ndarray | None = field(default=None, init=False, repr=False)
+    _position_offsets: list[np.ndarray | None] = field(
+        default_factory=lambda: [None, None], init=False, repr=False
+    )
+    _rotation_offsets: list[np.ndarray | None] = field(
+        default_factory=lambda: [None, None], init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         if not 0 <= self.grip_disable_threshold < self.grip_enable_threshold <= 1:
@@ -42,6 +52,8 @@ class PicoToG1Joints(RobotActionProcessorStep):
         self._enabled = (False, False)
         self._grips = (0.0, 0.0)
         self._held_q = None
+        self._position_offsets = [None, None]
+        self._rotation_offsets = [None, None]
         self.solver.smooth_filter.reset()
 
     @property
@@ -83,6 +95,23 @@ class PicoToG1Joints(RobotActionProcessorStep):
             for grip, previous in zip(grips, self._enabled, strict=True)
         ]
         enabled = (enabled_values[0], enabled_values[1])
+        engaging = tuple(
+            active and not previous for previous, active in zip(self._enabled, enabled, strict=True)
+        )
+        position_offsets = self._position_offsets.copy()
+        rotation_offsets = self._rotation_offsets.copy()
+        if any(engaging):
+            measured_targets = self.solver.forward_kinematics(q)
+            for index, starting in enumerate(engaging):
+                if starting:
+                    # Keep translation in the mapped robot frame; rotating a
+                    # controller in place must not orbit the robot wrist.
+                    position_offsets[index] = measured_targets[index][:3, 3] - targets[index][:3, 3]
+                    rotation_offsets[index] = targets[index][:3, :3].T @ measured_targets[index][:3, :3]
+        for index, active in enumerate(enabled):
+            if active:
+                targets[index][:3, 3] += position_offsets[index]
+                targets[index][:3, :3] = targets[index][:3, :3] @ rotation_offsets[index]
         held_q = q.copy() if self._held_q is None else self._held_q.copy()
         for index, (previous, active) in enumerate(zip(self._enabled, enabled, strict=True)):
             if previous and not active:
@@ -106,7 +135,11 @@ class PicoToG1Joints(RobotActionProcessorStep):
             ):
                 raise ValueError("IK violates model joint limits")
             for index, active in enumerate(enabled):
-                if active:
+                if engaging[index]:
+                    # Engagement itself requests no movement, including nullspace
+                    # changes from IK or history retained in its smoothing filter.
+                    candidate[index * 7 : (index + 1) * 7] = q[index * 7 : (index + 1) * 7]
+                elif active:
                     candidate[index * 7 : (index + 1) * 7] = solved[index * 7 : (index + 1) * 7]
         if time.monotonic() - action["sample_time"] > self.timeout_s:
             raise TimeoutError("PICO sample expired during IK")
@@ -120,6 +153,8 @@ class PicoToG1Joints(RobotActionProcessorStep):
         self._enabled = enabled
         self._grips = (float(grips[0]), float(grips[1]))
         self._held_q = held_q
+        self._position_offsets = position_offsets
+        self._rotation_offsets = rotation_offsets
         return result
 
     def transform_features(
