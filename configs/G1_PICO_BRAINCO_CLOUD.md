@@ -32,6 +32,26 @@ uv run --no-sync accelerate launch --multi_gpu --num_processes=8 \
 Run the recipes separately. Use a new `--output_dir` for each fresh experiment.
 These commands do not provision cloud resources or upload the dataset.
 
+## Absolute-action Flux recipe
+
+For Flux's currently supported action-selection path, use
+`flux_cloud_g1_pico_brainco_absolute.json` with the separate
+`/data/datasets/g1_pico_brainco_combined_absolute` dataset. It keeps the same
+recordings, cameras, 26 channels, 50-frame chunks and FSDP training budget, but
+uses exact absolute-action quantiles and `use_relative_actions=false`.
+Copy this absolute dataset to the cloud separately; do not pair this config with
+the relative dataset's action statistics.
+
+```bash
+uv run --no-sync accelerate launch --multi_gpu --num_processes=8 \
+  -m lerobot.scripts.lerobot_train \
+  --config_path=configs/flux_cloud_g1_pico_brainco_absolute.json
+```
+
+The absolute recipe avoids the relative-action execution limitation described
+below. It still requires training, inference-latency measurements and hardware
+evaluation before claiming task success on G1D.
+
 ## Shared data and deployment contract
 
 Both policies use 26 state/action channels, the three named cameras, a 50-frame

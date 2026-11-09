@@ -118,12 +118,12 @@
     "input_timeout_s": 0.5
   },
   "dataset": {
-    "repo_id": "local/g1_pico_three_cameras",
-    "root": "/home/oleg/extend_lerobot/lerobot/datasets/g1_pico_three_cameras",
+    "repo_id": "local/g1_pico_bottle_transfer",
+    "root": "/home/oleg/extend_lerobot/lerobot/datasets/g1_pico_bottle_transfer",
     "no_stamp": true,
-    "single_task": "Grasp a bottle and place it to the box",
+    "single_task": "Ggrasp a bottle with right hand, transfer it to left hand, and place it in the box",
     "fps": 30,
-    "num_episodes": 1,
+    "num_episodes": 100,
     "episode_time_s": 120,
     "push_to_hub": false,
     "video": true,

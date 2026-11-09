@@ -149,9 +149,9 @@ right hand `/dev/video0`. In the robot's activated `lerobot` environment:
 
 ```bash
 python -m lerobot.cameras.zmq.image_server \
-  --camera head_camera=/dev/video4 \
-  --camera left_wrist_camera=/dev/video2 \
-  --camera right_wrist_camera=/dev/video0 \
+  --camera head_camera=/dev/video0 \
+  --camera left_wrist_camera=/dev/video4 \
+  --camera right_wrist_camera=/dev/video2 \
   --width 640 --height 480 --fps 30 --fourcc MJPG --port 5555
 ```
 
@@ -376,6 +376,56 @@ See [the recording command and resume workflow](HEAD_CAMERA.md#4-host-start-data
 for an explicit local dataset root, all three video features, one-episode sessions,
 keyboard controls, and appending episodes after reconnecting. Recording sends robot
 commands immediately after setup, just like standard teleoperation.
+
+## 8.2. Run the trained pi05 policy without recording
+
+Stop `lerobot-teleoperate`, `lerobot-record`, and any other host robot controller
+first. Keep the robot body/hand bridges and the three-camera publisher from
+sections 2–4 running, and verify camera identities as in section 7. Autonomous
+rollout does not use the Pico headset, PC service, or USB forwarding.
+
+This checkpoint contains a PEFT/LoRA adapter and needs PEFT plus Transformers
+in the host Unitree environment. Install these once before launching rollout
+(the checkpoint was saved with PEFT 0.21.0):
+
+```bash
+uv pip install --python /home/oleg/extend_lerobot/envs/unitree-g1/bin/python \
+  'peft==0.21.0' 'transformers>=5.4.0,<5.6.0'
+```
+
+The adapter also loads its base model, `lerobot/pi05_base`, from the Hugging Face
+cache or downloads it on first use; allow access to that model if it is not cached.
+
+On the host, run:
+
+```bash
+source /home/oleg/extend_lerobot/activate_unitree_g1.sh
+cd /home/oleg/extend_lerobot/lerobot
+/home/oleg/extend_lerobot/envs/unitree-g1/bin/lerobot-rollout \
+  --config_path=/home/oleg/extend_lerobot/lerobot/configs/rollout_pi05_g1d_50.json
+```
+
+The preset loads
+`/home/oleg/extend_lerobot/lerobot/outputs/pi05_g1d_50/checkpoints/last/pretrained_model`
+on CUDA and uses `strategy.type=base`: no dataset is created, recorded, or
+uploaded. It keeps the reference rollout's RTC inference (`mode=trained`,
+`execution_horizon=5`, `queue_threshold=15`) at 30 FPS, with both Revo2 hands
+at motor speed `0.5` and all three 640×480 RGB camera streams. Display and sounds
+are disabled. The task prompt is `Grasp a bottle and place it to the box`;
+override it with `--task="..."` if the intended task differs. Do not add
+`--dataset.*` options: the base strategy rejects them.
+
+**Policy motion starts automatically after setup; there is no arming prompt.**
+Have the robot and scene ready before launching. The default duration is unlimited;
+add `--duration=30` to bound the control loop to 30 seconds. Press Ctrl+C to stop.
+By default, teardown attempts to return to the joint positions captured at startup
+before disconnecting; keep the workspace clear until shutdown completes. Pass
+`--return_to_initial_position=false` to leave the robot at its final pose instead.
+
+This rollout preset contains its own copy of the robot settings. If addresses
+change, update the body `robot_ip`, both hand `robot_ip` fields, and every camera
+`server_address` in this JSON too. Keep all three camera names and dimensions
+aligned with the checkpoint. Use the shutdown sequence below after rollout exits.
 
 ## 9. Stop in order
 
