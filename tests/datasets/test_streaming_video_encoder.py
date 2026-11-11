@@ -164,6 +164,41 @@ class TestCameraEncoderThread:
 
 
 class TestStreamingVideoEncoder:
+    @pytest.mark.parametrize("fail", [False, True])
+    def test_wait_until_ready_covers_first_frame_and_errors(self, tmp_path, monkeypatch, fail):
+        started = threading.Event()
+        release = threading.Event()
+        original_open = av.open
+
+        def delayed_open(*args, **kwargs):
+            started.set()
+            assert release.wait(5)
+            if fail:
+                raise ValueError("codec startup failed")
+            return original_open(*args, **kwargs)
+
+        monkeypatch.setattr(av, "open", delayed_open)
+        encoder = StreamingVideoEncoder(
+            fps=30, rgb_encoder=RGBEncoderConfig(vcodec="h264", pix_fmt="yuv420p")
+        )
+        try:
+            encoder.start_episode(["cam"], tmp_path)
+            encoder.feed_frame("cam", np.zeros((64, 96, 3), dtype=np.uint8))
+            assert started.wait(5)
+            with pytest.raises(TimeoutError, match="did not initialize"):
+                encoder.wait_until_ready(timeout_s=0.01)
+            release.set()
+            if fail:
+                with pytest.raises(RuntimeError, match="failed during startup") as error:
+                    encoder.wait_until_ready()
+                assert isinstance(error.value.__cause__, ValueError)
+            else:
+                encoder.wait_until_ready()
+                assert encoder._threads["cam"].first_frame_ready.is_set()
+        finally:
+            release.set()
+            encoder.cancel_episode()
+
     def _make_encoder_config(self, **kwargs):
         """Helper to build an RGBEncoderConfig."""
         return RGBEncoderConfig(**kwargs)

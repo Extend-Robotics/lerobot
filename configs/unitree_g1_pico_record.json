@@ -121,7 +121,7 @@
     "repo_id": "local/g1_pico_bottle_transfer",
     "root": "/home/oleg/extend_lerobot/lerobot/datasets/g1_pico_bottle_transfer",
     "no_stamp": true,
-    "single_task": "Ggrasp a bottle with right hand, transfer it to left hand, and place it in the box",
+    "single_task": "Grasp a bottle with right hand, transfer it to left hand, and place it in the box",
     "fps": 30,
     "num_episodes": 100,
     "episode_time_s": 120,

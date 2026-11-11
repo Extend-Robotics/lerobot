@@ -54,7 +54,7 @@ class UnitreeG1Config(RobotConfig):
     read_only: bool = False
     arm_commands_only: bool = False
     # Shared by teleoperation and policy execution in arm-only mode.
-    command_timeout_s: float = 0.25
+    command_timeout_s: float = 0.5
     arm_max_step: float = 0.12  # radians from measured joints, scaled across both arms
     hand_max_speed: float = 1.0  # normalized position units/second
 

@@ -130,11 +130,16 @@ on the robot:
 
 ```bash
 sudo systemctl stop teleimager.service
+
 sudo modprobe -r uvcvideo
 sudo modprobe uvcvideo
 sudo udevadm settle
 ls -l /dev/video*
 lsusb -t
+
+source /home/unitree/miniconda3/etc/profile.d/conda.sh
+conda activate lerobot
+cd /home/unitree/Documents/lerobot_unitree/lerobot
 lerobot-find-cameras opencv
 ```
 
@@ -466,3 +471,4 @@ Commands and field names were checked against this local checkout. During USB di
 - `/home/oleg/extend_lerobot/lerobot/src/lerobot/robots/unitree_g1/run_g1_server.py`
 - `/home/oleg/extend_lerobot/lerobot/src/lerobot/robots/brainco_revo2/bridge.py`
 - `/home/oleg/extend_lerobot/lerobot/src/lerobot/scripts/lerobot_teleoperate.py`
+

@@ -374,6 +374,12 @@ class RolloutController:
                     continue
                 # Idle counterpart of the per-tick pump in the control loop: deliver an answer
                 # that landed just as the segment ended.
+                try:
+                    self._ctx.hardware.robot_wrapper.hold_position()
+                except Exception:
+                    self._strategy_failure_traceback = traceback.format_exc()
+                    logger.exception("Robot failed while holding between segments")
+                    continue
                 self._ctx.policy.inference.pump_query()
                 self._wake.wait(timeout=self._POLL_INTERVAL_S)
                 self._wake.clear()
@@ -405,6 +411,8 @@ class RolloutController:
             self._emit(RolloutEvent.SEGMENT_STARTED)
             try:
                 self._strategy.run(self._ctx)
+                if not engine.failed:
+                    self._ctx.hardware.robot_wrapper.hold_position()
             except Exception:
                 # Route to the same public failure surface as an engine failure, instead of
                 # unwinding through serve() as a clean-looking STOPPED.
@@ -443,6 +451,13 @@ class RolloutController:
             logger.warning("No initial position captured — skipping the return move")
             self._emit(RolloutEvent.RESET_SKIPPED)
         elif self._strategy.return_to_initial_position(self._ctx.hardware):
+            try:
+                self._ctx.hardware.robot_wrapper.hold_position()
+            except Exception:
+                self._strategy_failure_traceback = traceback.format_exc()
+                logger.exception("Robot failed after returning to initial position")
+                self._emit(RolloutEvent.RESET_FAILED)
+                return
             self._emit(RolloutEvent.RESET_DONE)
         else:
             # RESET_DONE guarantees "back at the initial position"; a failed move must not claim it.

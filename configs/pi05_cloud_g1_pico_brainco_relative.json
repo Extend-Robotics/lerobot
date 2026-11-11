@@ -1,7 +1,7 @@
 {
   "dataset": {
-    "repo_id": "local/g1_pico_brainco_combined_relative",
-    "root": "/data/datasets/g1_pico_brainco_combined_relative",
+    "repo_id": "local/g1_pico_bottle_transfer_filtered_relative",
+    "root": "/data/datasets/g1_pico_bottle_transfer_filtered_relative",
     "eval_split": 0.0,
     "image_transforms": {
       "enable": true,
@@ -55,7 +55,8 @@
     "freeze_vision_encoder": false,
     "train_expert_only": false,
     "gradient_checkpointing": true,
-    "compile_model": false,
+    "compile_model": true,
+    "compile_mode": "default",
     "dtype": "bfloat16",
     "rtc_training_max_delay": 10,
     "device": "cuda",

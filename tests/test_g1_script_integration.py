@@ -103,6 +103,7 @@ def test_standard_record_saves_accepted_joint_targets(pipeline_state, with_camer
                 "shape": image.shape,
                 "names": ["height", "width", "channels"],
             }
+    dataset.meta.video_keys = [key for key, feature in dataset.features.items() if feature["dtype"] == "video"]
     _, robot_processor, obs_processor = make_default_processors()
     record_loop(
         robot,
@@ -117,6 +118,12 @@ def test_standard_record_saves_accepted_joint_targets(pipeline_state, with_camer
         single_task="test",
     )
     teleop.send_feedback.assert_not_called()
+    assert robot.hold_position.call_count == (2 if with_camera else 1)
+    if with_camera:
+        dataset.wait_for_video_encoder.assert_called_once_with()
+    else:
+        dataset.wait_for_video_encoder.assert_not_called()
+    assert robot.mock_calls[-1][0] == "hold_position"
     frame = dataset.add_frame.call_args.args[0]
     np.testing.assert_allclose(frame["action"], np.full(14, 0.12))
     np.testing.assert_array_equal(frame["observation.state"], np.zeros(14))

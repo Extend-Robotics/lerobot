@@ -212,6 +212,7 @@ class UnitreeG1(Robot):
         self.arm_ik = G1_29_ArmIK() if config.gravity_compensation else None
         self._arm_target: RobotAction | None = None
         self._arm_target_at = 0.0
+        self._arm_holding = False
         self._arm_error: Exception | None = None
         self._arm_thread: threading.Thread | None = None
         self._hand_command_at: float | None = None
@@ -419,6 +420,7 @@ class UnitreeG1(Robot):
         self._shutdown_event.clear()
         self._arm_target = None
         self._arm_error = None
+        self._arm_holding = False
         self._hand_command = {}
         self._hand_command_at = None
         try:
@@ -539,6 +541,7 @@ class UnitreeG1(Robot):
             self._arm_thread.join(timeout=2.0)
         with self._control_lock:
             self._arm_target = None
+            self._arm_holding = False
         # Hand disconnect never sends a gesture. Close every hand even if one fails.
         for side, hand in self.hands.items():
             try:
@@ -678,13 +681,40 @@ class UnitreeG1(Robot):
             raise ValueError("Nonfinite arm feedback")
         return q
 
+    def hold_position(self) -> None:
+        """Hold the accepted arm target through saving/idle; the next action resumes control.
+
+        This only exempts intentional pauses from command age checks. It cannot
+        revive an expired stream or a latched fault, and feedback must stay fresh.
+        No target is created before the first action, so initial idle stays passive.
+        """
+        if not self.config.arm_commands_only or self.config.read_only:
+            return
+        with self._control_lock:
+            self._check_arm_state()
+            if self._shutdown_event.is_set():
+                raise ConnectionError("Robot is disconnecting")
+            if (
+                self._arm_target is not None
+                and not self._arm_holding
+                and time.monotonic() - self._arm_target_at > self.config.command_timeout_s
+            ):
+                raise TimeoutError("Arm command stream expired; reconnect before holding")
+            self._arm_holding = self._arm_target is not None
+            # The first hand command after a pause gets one control step, not the
+            # entire pause duration's motion allowance.
+            self._hand_command_at = None
+
     def _publish_arm_target(self) -> None:
         """Repeat the accepted joint target; never advance beyond the recorded action."""
         with self._control_lock:
             if self._shutdown_event.is_set() or self._arm_target is None:
                 return
             measured = self._check_arm_state()
-            if time.monotonic() - self._arm_target_at > self.config.command_timeout_s:
+            if (
+                not self._arm_holding
+                and time.monotonic() - self._arm_target_at > self.config.command_timeout_s
+            ):
                 raise TimeoutError("Arm command stream expired")
             tau = np.zeros(NUM_MOTORS)
             if self.arm_ik is not None:
@@ -705,6 +735,7 @@ class UnitreeG1(Robot):
             with self._control_lock:
                 self._arm_error = exc
                 self._arm_target = None
+                self._arm_holding = False
                 self._send_zero_torque()
 
     def send_action(self, action: RobotAction) -> RobotAction:
@@ -738,6 +769,7 @@ class UnitreeG1(Robot):
             measured = self._check_arm_state()
             if (
                 self._arm_target is not None
+                and not self._arm_holding
                 and time.monotonic() - self._arm_target_at > self.config.command_timeout_s
             ):
                 raise TimeoutError("Arm command stream expired; reconnect before sending commands")
@@ -784,11 +816,13 @@ class UnitreeG1(Robot):
                     raise TimeoutError("Hand dispatch exceeded command deadline")
                 self._arm_target = {key: bounded[key] for key in keys}
                 self._arm_target_at = time.monotonic()
+                self._arm_holding = False
                 self._hand_command = {key: value for key, value in bounded.items() if "_hand." in key}
                 self._hand_command_at = self._arm_target_at
             except Exception as exc:
                 self._arm_error = exc
                 self._arm_target = None
+                self._arm_holding = False
                 self._send_zero_torque()
                 raise
             return bounded
@@ -877,6 +911,7 @@ class UnitreeG1(Robot):
         # publishing its own targets throughout, and the robot is driven by two writers at once.
         with self._control_lock:
             self._arm_target = None
+            self._arm_holding = False
             if self.config.is_simulation and self.sim_env is not None:
                 self.sim_env.reset()
                 self.publish_lowcmd(

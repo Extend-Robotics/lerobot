@@ -616,6 +616,71 @@ class TestArmJointControl:
         assert robot._arm_target is None
         mocks["publisher_mock"].Write.assert_not_called()
 
+    def test_intentional_hold_survives_command_age_and_resume_restores_watchdog(self, make_robot):
+        from lerobot.robots.unitree_g1.unitree_g1 import G1_29_LowState
+
+        factory, mocks = make_robot
+        robot = arm_for_publish(factory(arm_commands_only=True), mocks)
+        robot._lowstate = G1_29_LowState()
+        for joint in G1_29_JointIndex:
+            robot._lowstate.motor_state[joint].q = 0.0
+        robot._lowstate_received_at = time.monotonic()
+        robot.hold_position()
+        assert robot._arm_target is None  # initial idle must not command movement
+        robot._publish_arm_target()
+        mocks["publisher_mock"].Write.assert_not_called()
+
+        action = dict.fromkeys(robot.action_features, 0.1)
+        for _ in range(2):  # save/restart and reset/restart use the same transition
+            robot.send_action(action)
+            assert not robot._arm_holding
+            robot.hold_position()
+            robot._arm_target_at -= 60  # saving or an operator pause can exceed 250ms
+            robot._lowstate_received_at = time.monotonic()
+            robot._publish_arm_target()
+            assert robot._arm_error is None
+            assert robot._arm_target == action
+            robot.send_action(action)
+            assert not robot._arm_holding
+        robot._arm_target_at -= 1
+        robot._arm_loop()
+        assert isinstance(robot._arm_error, TimeoutError)
+        assert robot._arm_target is None
+        with pytest.raises(RuntimeError, match="publisher failed"):
+            robot.hold_position()
+
+    def test_hold_does_not_bypass_feedback_watchdog(self, make_robot):
+        from lerobot.robots.unitree_g1.unitree_g1 import G1_29_LowState
+
+        factory, mocks = make_robot
+        robot = arm_for_publish(factory(arm_commands_only=True), mocks)
+        robot._lowstate = G1_29_LowState()
+        for joint in G1_29_JointIndex:
+            robot._lowstate.motor_state[joint].q = 0.0
+        robot._lowstate_received_at = time.monotonic()
+        robot.send_action(dict.fromkeys(robot.action_features, 0.1))
+        robot.hold_position()
+        robot._lowstate_received_at -= 1
+        robot._arm_loop()
+        assert isinstance(robot._arm_error, TimeoutError)
+        assert str(robot._arm_error) == "Robot feedback is stale"
+        assert all(motor.kp == motor.kd == motor.tau == 0 for motor in robot.msg.motor_cmd[:29])
+
+    def test_hold_cannot_rescue_expired_active_commands(self, make_robot):
+        from lerobot.robots.unitree_g1.unitree_g1 import G1_29_LowState
+
+        factory, mocks = make_robot
+        robot = arm_for_publish(factory(arm_commands_only=True), mocks)
+        robot._lowstate = G1_29_LowState()
+        for joint in G1_29_JointIndex:
+            robot._lowstate.motor_state[joint].q = 0.0
+        robot._lowstate_received_at = time.monotonic()
+        robot.send_action(dict.fromkeys(robot.action_features, 0.1))
+        robot._arm_target_at -= 1
+        with pytest.raises(TimeoutError, match="command stream expired"):
+            robot.hold_position()
+        assert not robot._arm_holding
+
     def test_watchdog_passivates_and_latches_fault(self, make_robot):
         from lerobot.robots.unitree_g1.unitree_g1 import G1_29_LowState
 
@@ -878,7 +943,7 @@ class TestRevo2Composition:
         robot._lowstate_received_at = now[0]
 
         def slow_write(action):
-            now[0] += 0.3
+            now[0] += robot.config.command_timeout_s + 0.05
             return action
 
         hand.send_action.side_effect = slow_write

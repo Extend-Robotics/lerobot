@@ -294,6 +294,7 @@ def record_loop(
         timer = CycleTimer(fps, records_data=dataset is not None)
 
     no_action_count = 0
+    first_recorded_frame = True
     timestamp = 0.0
     start_episode_t = time.perf_counter()
     while timestamp < control_time_s:
@@ -368,11 +369,20 @@ def record_loop(
         # Write to dataset
         if dataset is not None:
             with timer.section("record"):
+                initializing_video = first_recorded_frame and bool(dataset.meta.video_keys)
+                if initializing_video:
+                    # NVENC and other codecs initialize lazily in background threads.
+                    # Keep the accepted pose through startup, then let the next
+                    # teleoperator action restore the normal command watchdog.
+                    robot.hold_position()
                 action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
                 frame = {**observation_frame, **action_frame, "task": single_task}
                 for step in teleop_action_processor.steps:
                     frame.update(getattr(step, "recording_frame", {}))
                 dataset.add_frame(frame)
+                if initializing_video:
+                    dataset.wait_for_video_encoder()
+                first_recorded_frame = False
 
         if display_data:
             with timer.section("telemetry"):
@@ -386,6 +396,10 @@ def record_loop(
         timer.wait()
 
         timestamp = time.perf_counter() - start_episode_t
+
+    # Prompts, buffer discard and episode saving do not produce fresh actions.
+    # Resume automatically on the next accepted teleoperator command.
+    robot.hold_position()
 
 
 @parser.wrap()
@@ -508,6 +522,12 @@ def record(
         with VideoEncodingManager(dataset):
             recorded_episodes = 0
             while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
+                # Keys pressed while saving belong to the previous episode. Do
+                # not let them skip or discard the next one before its first tick.
+                events["exit_early"] = False
+                events["rerecord_episode"] = False
+                if events["stop_recording"]:
+                    break
                 episode_index = dataset.num_episodes
                 log_say(f"Recording episode {episode_index}", cfg.play_sounds)
                 record_loop(
@@ -526,6 +546,12 @@ def record(
                     display_compressed_images=display_compressed_images,
                     timer=timer,
                 )
+
+                if not dataset.has_pending_frames():
+                    logging.info("No frames collected for episode %s; skipping empty episode", episode_index)
+                    dataset.clear_episode_buffer()
+                    timer.restart()
+                    continue
 
                 # Execute a few seconds without recording to give time to manually reset the environment
                 # Skip reset for the last episode to be recorded
