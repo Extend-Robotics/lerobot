@@ -264,7 +264,7 @@ class RTCInferenceEngine(InferenceEngine):
                     self._relative_step.action_names = list(cfg_names)
                 else:
                     self._relative_step.action_names = [
-                        k for k in robot_wrapper.action_features if k.endswith(".pos")
+                        k for k in robot_wrapper.action_features if k.endswith((".pos", ".q"))
                     ]
             logger.info("Relative actions enabled: RTC prefix will be re-anchored")
 

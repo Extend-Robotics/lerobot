@@ -110,6 +110,81 @@ def test_record_and_resume(tmp_path):
     assert dataset.meta.total_tasks == 1
 
 
+@pytest.mark.parametrize("control", ["right", "left", "esc"])
+def test_record_keys_during_save_do_not_skip_next_episode(tmp_path, monkeypatch, control):
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    from lerobot.utils.keyboard_input import apply_recording_control
+
+    events = {"exit_early": False, "rerecord_episode": False, "stop_recording": False}
+    monkeypatch.setattr("lerobot.scripts.lerobot_record.init_keyboard_listener", lambda: (None, events))
+    original_save = LeRobotDataset.save_episode
+    saved_sizes = []
+
+    def save_with_key(dataset, *args, **kwargs):
+        saved_sizes.append(dataset.writer.episode_buffer["size"])
+        result = original_save(dataset, *args, **kwargs)
+        if len(saved_sizes) == 1:
+            apply_recording_control(control, events)
+        return result
+
+    monkeypatch.setattr(LeRobotDataset, "save_episode", save_with_key)
+    dataset = record(
+        RecordConfig(
+            robot=MockRobotConfig(),
+            teleop=MockTeleopConfig(),
+            play_sounds=False,
+            dataset=DatasetRecordConfig(
+                repo_id=DUMMY_REPO_ID,
+                root=tmp_path / "save_keys",
+                single_task="test save keys",
+                num_episodes=2,
+                episode_time_s=0.05,
+                reset_time_s=0,
+                push_to_hub=False,
+            ),
+        )
+    )
+    assert dataset.num_episodes == (1 if control == "esc" else 2)
+    assert len(saved_sizes) == dataset.num_episodes
+    assert all(size > 0 for size in saved_sizes)
+
+
+@pytest.mark.parametrize("control", ["right", "left", "esc"])
+def test_record_handles_key_before_first_frame(tmp_path, monkeypatch, control):
+    from lerobot.utils.keyboard_input import apply_recording_control
+
+    events = {"exit_early": False, "rerecord_episode": False, "stop_recording": False}
+    monkeypatch.setattr("lerobot.scripts.lerobot_record.init_keyboard_listener", lambda: (None, events))
+    attempts = []
+
+    def early_key_loop(*args, **kwargs):
+        attempts.append(kwargs["dataset"].num_episodes)
+        if len(attempts) == 1:
+            apply_recording_control(control, events)
+        return record_loop(*args, **kwargs)
+
+    monkeypatch.setattr("lerobot.scripts.lerobot_record.record_loop", early_key_loop)
+    dataset = record(
+        RecordConfig(
+            robot=MockRobotConfig(),
+            teleop=MockTeleopConfig(),
+            play_sounds=False,
+            dataset=DatasetRecordConfig(
+                repo_id=DUMMY_REPO_ID,
+                root=tmp_path / "early_key",
+                single_task="test early key",
+                num_episodes=1,
+                episode_time_s=0.05,
+                reset_time_s=0,
+                push_to_hub=False,
+            ),
+        )
+    )
+    assert dataset.num_episodes == (0 if control == "esc" else 1)
+    assert attempts == ([0] if control == "esc" else [0, 0])
+    assert dataset.num_frames == 0 if control == "esc" else dataset.num_frames > 0
+
+
 def test_record_and_replay(tmp_path, cadence_log):
     robot_cfg = MockRobotConfig()
     teleop_cfg = MockTeleopConfig()
@@ -253,3 +328,124 @@ def test_record_loop_without_a_teleoperator_paces_and_terminates():
 
     # 0.1 s at 30 Hz is 3 ticks; the upper bound is what proves the phase was paced.
     assert 1 <= calls <= 6
+
+
+def test_record_holds_through_slow_video_startup_and_resumes(monkeypatch, clock):
+    from types import SimpleNamespace
+
+    from tests.mocks.mock_robot import MockRobot
+    from tests.mocks.mock_teleop import MockTeleop
+
+    events = {"exit_early": False}
+    sends = []
+    waits = []
+
+    class HoldingRobot(MockRobot):
+        holding = False
+
+        def hold_position(self):
+            self.holding = True
+
+        def send_action(self, action):
+            if sends:
+                assert self.holding, "startup exceeded the active command deadline"
+            sends.append(action.copy())
+            self.holding = False
+            return action
+
+    robot = HoldingRobot(MockRobotConfig())
+    teleop = MockTeleop(MockTeleopConfig())
+    frames = []
+
+    def add_frame(frame):
+        if not frames:
+            assert robot.holding
+        else:
+            assert not robot.holding, "the second command must restore the watchdog"
+            events["exit_early"] = True
+        frames.append(frame)
+
+    def wait_for_video_encoder():
+        assert len(frames) == 1
+        assert robot.holding
+        clock.advance(0.4)  # a first-frame stall longer than G1's 250ms watchdog
+        waits.append(True)
+
+    dataset = SimpleNamespace(
+        fps=30,
+        features={},
+        meta=SimpleNamespace(video_keys=["camera"]),
+        add_frame=add_frame,
+        wait_for_video_encoder=wait_for_video_encoder,
+    )
+    monkeypatch.setattr("lerobot.scripts.lerobot_record.build_dataset_frame", lambda *a, **k: {})
+    robot.connect()
+    teleop.connect()
+    try:
+        teleop_processor, robot_processor, observation_processor = make_default_processors()
+        record_loop(
+            robot=robot,
+            events=events,
+            fps=30,
+            dataset=dataset,
+            teleop=teleop,
+            teleop_action_processor=teleop_processor,
+            robot_action_processor=robot_processor,
+            robot_observation_processor=observation_processor,
+            control_time_s=1.0,
+        )
+    finally:
+        teleop.disconnect()
+        robot.disconnect()
+    assert len(frames) == len(sends) == 2
+    assert waits == [True]
+
+
+def test_record_holds_during_save_and_resumes_next_episode(tmp_path, monkeypatch):
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    from tests.mocks.mock_robot import MockRobot
+
+    class HoldingRobot(MockRobot):
+        holding = False
+        resumes = 0
+
+        def hold_position(self):
+            self.holding = True
+
+        def send_action(self, action):
+            if self.holding:
+                self.resumes += 1
+            result = super().send_action(action)
+            self.holding = False
+            return result
+
+    robot = HoldingRobot(MockRobotConfig())
+    monkeypatch.setattr("lerobot.scripts.lerobot_record.make_robot_from_config", lambda _: robot)
+    original_save = LeRobotDataset.save_episode
+    saved = []
+
+    def save_in_hold(dataset, *args, **kwargs):
+        assert robot.holding, "saving must not leave the active command watchdog armed"
+        saved.append(dataset.num_episodes)
+        return original_save(dataset, *args, **kwargs)
+
+    monkeypatch.setattr(LeRobotDataset, "save_episode", save_in_hold)
+    dataset = record(
+        RecordConfig(
+            robot=robot.config,
+            teleop=MockTeleopConfig(),
+            dataset=DatasetRecordConfig(
+                repo_id=DUMMY_REPO_ID,
+                root=tmp_path / "hold_recording",
+                single_task="test hold",
+                num_episodes=2,
+                episode_time_s=0.1,
+                reset_time_s=0.1,
+                push_to_hub=False,
+            ),
+            play_sounds=False,
+        )
+    )
+    assert saved == [0, 1]
+    assert dataset.num_episodes == 2
+    assert robot.resumes == 2  # enter the reset phase, then enter episode two

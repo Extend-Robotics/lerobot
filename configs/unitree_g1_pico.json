@@ -1,0 +1,28 @@
+{
+  "robot": {
+    "type": "unitree_g1",
+    "robot_ip": "192.168.123.164",
+    "is_simulation": false,
+    "arm_commands_only": true,
+    "gravity_compensation": true,
+    "left_hand": {
+      "side": "left",
+      "transport": "zmq",
+      "robot_ip": "192.168.123.164",
+      "speed": 0.5
+    },
+    "right_hand": {
+      "side": "right",
+      "transport": "zmq",
+      "robot_ip": "192.168.123.164",
+      "speed": 0.5
+    },
+    "kp": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 300, 300, 300, 80, 80, 80, 80, 40, 40, 40, 80, 80, 80, 80, 40, 40, 40],
+    "kd": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 3, 3, 3, 3, 1.5, 1.5, 1.5, 3, 3, 3, 3, 1.5, 1.5, 1.5]
+  },
+  "teleop": {
+    "type": "bi_pico4",
+    "output_mode": "xr",
+    "input_timeout_s": 0.5
+  }
+}

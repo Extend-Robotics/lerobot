@@ -785,6 +785,8 @@ class _CameraEncoderThread(threading.Thread):
         self.result_queue = result_queue
         self.stop_event = stop_event
         self.encoder_threads = encoder_threads
+        self.first_frame_ready = threading.Event()
+        self.startup_error: Exception | None = None
 
     def run(self) -> None:
         from .compute_stats import RunningQuantileStats, auto_downsample_height_width
@@ -860,6 +862,7 @@ class _CameraEncoderThread(threading.Thread):
                 stats_tracker.update(img_for_stats)
 
                 frame_count += 1
+                self.first_frame_ready.set()
 
             # Flush encoder
             if container is not None and output_stream is not None:
@@ -880,6 +883,8 @@ class _CameraEncoderThread(threading.Thread):
                 self.result_queue.put(("ok", None))
 
         except Exception as e:
+            self.startup_error = e
+            self.first_frame_ready.set()
             logger.error(f"Encoder thread error: {e}")
             if container is not None:
                 with contextlib.suppress(Exception):
@@ -1022,6 +1027,19 @@ class StreamingVideoEncoder:
                     f"Encoder queue full for {video_key}, dropped {count} frame(s). "
                     f"Consider using vcodec='auto' for hardware encoding or increasing encoder_queue_maxsize."
                 )
+
+    def wait_until_ready(self, timeout_s: float = 30.0) -> None:
+        """Wait for each camera's first frame, including lazy codec initialization.
+
+        Call after feeding the first frame and while hardware is intentionally
+        holding: GPU initialization can stall Python threads beyond control deadlines.
+        Later frames remain asynchronous.
+        """
+        for key, thread in self._threads.items():
+            if not thread.first_frame_ready.wait(timeout_s):
+                raise TimeoutError(f"Video encoder for {key} did not initialize within {timeout_s:g}s")
+            if thread.startup_error is not None:
+                raise RuntimeError(f"Video encoder for {key} failed during startup") from thread.startup_error
 
     def finish_episode(self) -> dict[str, tuple[Path, dict | None]]:
         """Finish encoding the current episode.

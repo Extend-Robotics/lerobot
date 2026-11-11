@@ -47,6 +47,10 @@ class ThreadSafeRobot:
         with self._lock:
             return self._robot.send_action(action)
 
+    def hold_position(self) -> None:
+        with self._lock:
+            self._robot.hold_position()
+
     # -- Read-only proxies (no lock needed) -----------------------------------
 
     @property

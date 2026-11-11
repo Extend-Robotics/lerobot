@@ -1,0 +1,105 @@
+{
+  "dataset": {
+    "repo_id": "local/g1_pico_bottle_transfer_filtered_relative",
+    "root": "/data/datasets/g1_pico_bottle_transfer_filtered_relative",
+    "eval_split": 0.0,
+    "image_transforms": {
+      "enable": true,
+      "max_num_transforms": 2,
+      "random_order": false,
+      "tfs": {
+        "brightness": {
+          "type": "ColorJitter",
+          "kwargs": {
+            "brightness": [
+              0.8,
+              1.2
+            ]
+          }
+        },
+        "contrast": {
+          "type": "ColorJitter",
+          "kwargs": {
+            "contrast": [
+              0.8,
+              1.2
+            ]
+          }
+        }
+      }
+    },
+    "streaming": false,
+    "video_backend": "torchcodec"
+  },
+  "policy": {
+    "type": "pi05",
+    "pretrained_path": "lerobot/pi05_base",
+    "normalization_mapping": {
+      "ACTION": "QUANTILES",
+      "STATE": "QUANTILES",
+      "VISUAL": "IDENTITY"
+    },
+    "n_action_steps": 10,
+    "optimizer_lr": 2.5e-05,
+    "optimizer_betas": [
+      0.9,
+      0.95
+    ],
+    "optimizer_eps": 1e-08,
+    "optimizer_weight_decay": 0.01,
+    "optimizer_grad_clip_norm": 1.0,
+    "scheduler_warmup_steps": 1000,
+    "scheduler_decay_steps": 50000,
+    "scheduler_decay_lr": 2.5e-06,
+    "empty_cameras": 0,
+    "freeze_vision_encoder": false,
+    "train_expert_only": false,
+    "gradient_checkpointing": true,
+    "compile_model": true,
+    "compile_mode": "default",
+    "dtype": "bfloat16",
+    "rtc_training_max_delay": 10,
+    "device": "cuda",
+    "push_to_hub": false,
+    "chunk_size": 50,
+    "max_state_dim": 32,
+    "max_action_dim": 32,
+    "use_relative_actions": true,
+    "relative_exclude_joints": [
+      "left_hand.",
+      "right_hand."
+    ]
+  },
+  "accelerator": {
+    "mixed_precision": "bf16"
+  },
+  "output_dir": "/data/outputs/pi05_g1_pico_brainco_combined_relative",
+  "job_name": "pi05_g1_pico_brainco_combined_relative",
+  "batch_size": 32,
+  "num_workers": 4,
+  "steps": 50000,
+  "save_freq": 5000,
+  "seed": 1000,
+  "wandb": {
+    "enable": true,
+    "disable_artifact": true,
+    "project": "pickplace"
+  },
+  "parallelism": {
+    "dp_replicate": 8,
+    "dp_shard": 1
+  },
+  "prefetch_factor": 2,
+  "persistent_workers": true,
+  "dataloader_multiprocessing_context": "spawn",
+  "eval_steps": 0,
+  "env_eval_freq": 0,
+  "peft": null,
+  "ema": {
+    "enable": false
+  },
+  "save_checkpoint": true,
+  "checkpoint_format": "safetensors",
+  "save_checkpoint_to_hub": false,
+  "use_policy_training_preset": true
+}

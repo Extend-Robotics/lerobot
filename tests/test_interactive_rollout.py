@@ -322,6 +322,32 @@ def test_controller_start_reset_stop_flow_and_events():
     assert events[-1] is RolloutEvent.STOPPED
 
 
+def test_controller_enters_hold_before_reset_done_and_detects_idle_fault():
+    controller, events, strategy, _engine, _parent, run_started = _make_controller()
+    robot = controller._ctx.hardware.robot_wrapper
+    checks = []
+
+    def on_event(event, payload=None):
+        events.append(event)
+        if event is RolloutEvent.RESET_DONE:
+            checks.append(robot.hold_position.call_count)
+            robot.hold_position.side_effect = RuntimeError("Arm publisher failed")
+
+    controller._on_event = on_event
+    controller.start()
+    thread = _serve_thread(controller)
+    try:
+        assert _wait_for(run_started.is_set)
+        controller.reset()
+        assert _wait_for(controller._stopped.is_set)
+    finally:
+        controller.stop()
+        _join_session(thread)
+    assert checks and checks[0] >= 2  # hold after segment, then after the home sweep
+    assert RolloutEvent.STRATEGY_FAILED in events
+    strategy.run.assert_called_once()
+
+
 def test_controller_last_command_wins_over_a_pending_start():
     """Robot safety: a queued start must never fire after a later reset or stop."""
     controller, _events, strategy, _engine, _parent, _run_started = _make_controller()
