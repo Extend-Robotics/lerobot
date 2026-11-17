@@ -154,9 +154,9 @@ right hand `/dev/video0`. In the robot's activated `lerobot` environment:
 
 ```bash
 python -m lerobot.cameras.zmq.image_server \
-  --camera head_camera=/dev/video0 \
+  --camera head_camera=/dev/video2 \
   --camera left_wrist_camera=/dev/video4 \
-  --camera right_wrist_camera=/dev/video2 \
+  --camera right_wrist_camera=/dev/video0 \
   --width 640 --height 480 --fps 30 --fourcc MJPG --port 5555
 ```
 

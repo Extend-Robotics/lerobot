@@ -84,7 +84,7 @@ class CameraCaptureThread:
                     self.latest_timestamp = timestamp
             except Exception as e:
                 logger.warning(f"Camera {self.name} capture error: {e}")
-                time.sleep(0.01)
+                time.sleep(0.001)
 
     def get_latest(self) -> tuple[str | None, float]:
         """Get the latest encoded frame and its timestamp."""
@@ -144,7 +144,7 @@ class ImageServer:
                 while capture_thread.get_latest()[0] is None:
                     if time.monotonic() >= deadline:
                         raise TimeoutError(f"Camera {name} did not produce a frame within 10 seconds")
-                    time.sleep(0.01)
+                    time.sleep(0.001)
                 logger.info(f"Camera {name} ready (capture + encode in background)")
 
             while True:

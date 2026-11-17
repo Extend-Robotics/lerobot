@@ -837,6 +837,38 @@ def test_dagger_events_reset():
     assert not events.upload_requested.is_set()
 
 
+@pytest.mark.parametrize("push_to_hub", [False, True, None])
+def test_dagger_background_push_respects_dataset_setting(monkeypatch, push_to_hub):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from lerobot.rollout.configs import DAggerStrategyConfig
+    from lerobot.rollout.strategies.dagger import DAggerStrategy
+
+    strategy = DAggerStrategy(DAggerStrategyConfig())
+    dataset = MagicMock()
+    dataset_cfg = (
+        SimpleNamespace(push_to_hub=push_to_hub, tags=["corrections"], private=True)
+        if push_to_hub is not None
+        else None
+    )
+    cfg = SimpleNamespace(dataset=dataset_cfg)
+    push = MagicMock(return_value=True)
+    monkeypatch.setattr("lerobot.rollout.strategies.dagger.safe_push_to_hub", push)
+    strategy._needs_push.set()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        strategy._push_executor = executor
+        strategy._background_push(dataset, cfg)
+        if push_to_hub:
+            strategy._pending_push.result(timeout=5)
+            push.assert_called_once_with(dataset, tags=["corrections"], private=True)
+            assert not strategy._needs_push.is_set()
+        else:
+            assert strategy._pending_push is None
+            push.assert_not_called()
+            assert strategy._needs_push.is_set()
+
+
 # ---------------------------------------------------------------------------
 # Context dataclass
 # ---------------------------------------------------------------------------
@@ -1034,7 +1066,7 @@ def _make_loop_ctx(fps: float, multiplier: int, num_ticks: int, on_tick=None):
         processors=SimpleNamespace(
             robot_observation_processor=MagicMock(side_effect=lambda obs: obs),
             robot_action_processor=lambda pair: pair[0],
-            teleop_action_processor=lambda pair: pair[0],
+            teleop_action_processor=MagicMock(side_effect=lambda pair: pair[0]),
         ),
         policy=SimpleNamespace(inference=engine),
         data=SimpleNamespace(dataset=dataset, dataset_features=_LOOP_FEATURES, ordered_action_keys=["m.pos"]),

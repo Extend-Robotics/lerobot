@@ -778,6 +778,10 @@ class DAggerStrategy(RolloutStrategy):
 
         elif old_phase == DAggerPhase.PAUSED and new_phase == DAggerPhase.CORRECTING:
             logger.info("Entering correction mode - human teleop control")
+            # The policy may have moved the robot since the last teleop tick.
+            # Discard held joints, clutch offsets and IK filter history before
+            # processing any new sample, including the optional handover target.
+            ctx.processors.teleop_action_processor.reset()
             if (
                 self.config.smooth_handover
                 and not teleop_supports_feedback(teleop)
@@ -831,6 +835,10 @@ class DAggerStrategy(RolloutStrategy):
         are blocked while the operator is mid-correction to avoid
         uploading a partially-recorded episode.
         """
+        if cfg.dataset is None or not cfg.dataset.push_to_hub:
+            logger.info("Skipping push — dataset.push_to_hub is disabled")
+            return
+
         if self._push_executor is None:
             return
 

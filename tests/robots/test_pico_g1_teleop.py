@@ -250,3 +250,39 @@ def test_invalid_tracking_is_rejected_while_released(pipeline_state):
     s.action.update({"left.grip": 0.0, "right.grip": 0.0, "head.qw": 0.0})
     with pytest.raises(ValueError, match="XR pose"):
         s.processor((s.action, s.observation))
+
+
+@pytest.mark.parametrize("previous_grips", [(0, 0), (1, 0), (0, 1), (1, 1)])
+@pytest.mark.parametrize("current_grips", [(0, 0), (1, 0), (0, 1), (1, 1)])
+def test_dagger_correction_reanchors_after_policy_motion(pipeline_state, previous_grips, current_grips):
+    from lerobot.rollout.configs import DAggerStrategyConfig
+    from lerobot.rollout.strategies.dagger import DAggerPhase, DAggerStrategy
+
+    s = pipeline_state
+    s.action.update(dict(zip(("left.grip", "right.grip"), previous_grips, strict=True)))
+    s.processor((s.action, s.observation))
+    s.processor((s.action, s.observation))
+
+    # No teleop ticks occur while the policy moves the arms. Controller motion
+    # and release/repress events during that interval must not carry over.
+    s.observation = dict.fromkeys(ARM_KEYS, 0.4)
+    s.action["left.x"] += 0.3
+    s.action["right.x"] -= 0.2
+    s.action.update(dict(zip(("left.grip", "right.grip"), current_grips, strict=True)))
+    teleop = Mock(feedback_features={})
+    ctx = SimpleNamespace(
+        hardware=SimpleNamespace(robot_wrapper=Mock()),
+        processors=SimpleNamespace(teleop_action_processor=s.processor),
+    )
+    strategy = DAggerStrategy(DAggerStrategyConfig(smooth_handover=False))
+    strategy._apply_transition(
+        DAggerPhase.PAUSED, DAggerPhase.CORRECTING, Mock(), Mock(), teleop, ctx, s.observation
+    )
+    result = s.processor((s.action, s.observation))
+    assert result == s.observation
+    s.solver.smooth_filter.reset.assert_called_once()
+    if any(current_grips):
+        targets = s.solver.solve_ik.call_args.args[:2]
+        for index, active in enumerate(current_grips):
+            if active:
+                np.testing.assert_allclose(targets[index], np.eye(4), atol=1e-12)

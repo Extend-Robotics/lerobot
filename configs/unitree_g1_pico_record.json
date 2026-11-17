@@ -125,7 +125,6 @@
     "fps": 30,
     "num_episodes": 100,
     "episode_time_s": 120,
-    "push_to_hub": false,
     "video": true,
     "streaming_encoding": true,
     "encoder_queue_maxsize": 60,

@@ -14,36 +14,51 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Save each episode's first (left) and last (right) frames in one PNG per camera.
+"""Export episode preview images and a CSV of episode lengths and stationary percentages.
 
 Run from the LeRobot checkout with its dependencies installed:
 
-    uv run examples/dataset/extract_first_images.py /path/to/dataset /path/to/images
-    uv run examples/dataset/extract_first_images.py user/dataset ./images \
+    uv run examples/dataset/inspect_dataset.py /path/to/dataset /path/to/images
+    uv run examples/dataset/inspect_dataset.py user/dataset ./images \
         --camera observation.images.front
 
 Output: <output_dir>/<camera_key>/episode_000000.png, ...
-Each PNG has the original frame height and twice the original frame width.
+Each PNG has twice the original frame width and a header showing the episode
+length in frames and seconds, plus stationary percentage, above the original-height frames.
+Also writes <output_dir>/episode_lengths.csv with episode_index,length,stationary_percent
+sorted by length in frames (shortest first), then by episode index.
+Stationary samples have all observation.state changes <= --motion-threshold
+in the dataset's state units. The first sample is excluded; single-frame episodes
+have a blank stationary percentage because motion cannot be measured.
 Requires a dataset format supported by the installed LeRobot version.
 """
 
 import argparse
+import csv
+import math
 from pathlib import Path
 
-from PIL import Image
+import numpy as np
+from PIL import Image, ImageDraw
 from torchvision.transforms.functional import to_pil_image
 from tqdm import tqdm
 
 from lerobot.datasets import LeRobotDataset
 
 
-def extract_first_images(
+def inspect_dataset(
     dataset: LeRobotDataset,
     output_dir: Path,
     camera: str | None = None,
     overwrite: bool = False,
+    motion_threshold: float = 0.001,
 ) -> int:
-    """Export first/last frame pairs from a complete dataset; return the image count."""
+    """Export first/last frame pairs and episode statistics; return the image count."""
+    if not math.isfinite(motion_threshold) or motion_threshold < 0:
+        raise ValueError("Motion threshold must be finite and nonnegative.")
+    if "observation.state" not in dataset.features:
+        raise ValueError("The dataset needs observation.state to measure motion.")
+    state_data = dataset.select_columns("observation.state")
     camera_keys = dataset.meta.camera_keys
     if not camera_keys:
         raise ValueError("The dataset has no camera images.")
@@ -58,6 +73,11 @@ def extract_first_images(
             raise ValueError(f"Camera key cannot be used as a directory name: {key!r}")
         (output_dir / key).mkdir(parents=True, exist_ok=True)
 
+    csv_path = output_dir / "episode_lengths.csv"
+    if csv_path.exists() and not overwrite:
+        raise FileExistsError(f"{csv_path} already exists. Use --overwrite to replace it.")
+
+    episode_lengths: list[tuple[int, int, str]] = []
     saved = 0
     for episode in tqdm(dataset.meta.episodes, desc="Exporting first/last frames"):
         episode_index = int(episode["episode_index"])
@@ -70,17 +90,37 @@ def extract_first_images(
         first_index = int(episode["dataset_from_index"])
         # The metadata's end index is exclusive.
         last_index = int(episode["dataset_to_index"]) - 1
+        episode_length = last_index - first_index + 1
+        states = np.asarray(state_data[first_index : last_index + 1]["observation.state"], dtype=np.float64)
+        if not np.isfinite(states).all():
+            raise ValueError(f"Episode {episode_index} contains non-finite observation.state values.")
+        stationary_percent = ""
+        if episode_length > 1:
+            stationary = (np.abs(np.diff(states, axis=0)) <= motion_threshold).all(axis=1)
+            stationary_percent = f"{100 * stationary.mean():.2f}"
+        episode_lengths.append((episode_index, episode_length, stationary_percent))
+        length_label = f"Episode {episode_index}: {episode_length} frames ({episode_length / dataset.fps:.2f} s)"
+        stationary_label = f"Stationary: {stationary_percent}%" if stationary_percent else "Stationary: N/A"
         first_frame = dataset[first_index]
         last_frame = dataset[last_index] if last_index != first_index else first_frame
         for key, path in paths.items():
             # LeRobot returns RGB tensors in (C, H, W) layout with values in [0, 1].
             first_image = to_pil_image(first_frame[key]).convert("RGB")
             last_image = to_pil_image(last_frame[key]).convert("RGB")
-            combined = Image.new("RGB", (first_image.width * 2, first_image.height))
-            combined.paste(first_image, (0, 0))
-            combined.paste(last_image, (first_image.width, 0))
+            header_height = 44
+            combined = Image.new("RGB", (first_image.width * 2, first_image.height + header_height))
+            combined.paste(first_image, (0, header_height))
+            combined.paste(last_image, (first_image.width, header_height))
+            draw = ImageDraw.Draw(combined)
+            draw.text((8, 8), length_label, fill="white")
+            draw.text((8, 24), stationary_label, fill="white")
             combined.save(path)
             saved += 1
+
+    with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(["episode_index", "length", "stationary_percent"])
+        writer.writerows(sorted(episode_lengths, key=lambda item: (item[1], item[0])))
     return saved
 
 
@@ -91,8 +131,14 @@ def main() -> None:
     parser.add_argument("dataset", help="Local dataset directory or Hugging Face dataset ID (user/name).")
     parser.add_argument("output_dir", type=Path, help="Directory in which to save PNG images.")
     parser.add_argument("--camera", help="Camera feature key. By default, export every camera.")
-    parser.add_argument("--overwrite", action="store_true", help="Replace existing output images.")
+    parser.add_argument("--overwrite", action="store_true", help="Replace existing output images and CSV.")
     parser.add_argument("--video-backend", help="Video decoder backend, e.g. pyav or torchcodec.")
+    parser.add_argument(
+        "--motion-threshold",
+        type=float,
+        default=0.001,
+        help="Maximum per-sample change in every state dimension counted as stationary (default: 0.001).",
+    )
     args = parser.parse_args()
 
     local_path = Path(args.dataset).expanduser()
@@ -109,8 +155,11 @@ def main() -> None:
             parser.error(f"Local dataset directory does not exist: {local_path}")
         dataset = LeRobotDataset(repo_id=args.dataset, video_backend=args.video_backend)
 
-    saved = extract_first_images(dataset, args.output_dir.expanduser(), args.camera, args.overwrite)
+    saved = inspect_dataset(
+        dataset, args.output_dir.expanduser(), args.camera, args.overwrite, args.motion_threshold
+    )
     print(f"Saved {saved} images to {args.output_dir.expanduser().resolve()}")
+    print(f"Saved episode lengths to {args.output_dir.expanduser().resolve() / 'episode_lengths.csv'}")
 
 
 if __name__ == "__main__":
