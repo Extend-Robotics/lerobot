@@ -428,5 +428,7 @@ def send_next_action(
     action_dict = {k: interp[i].item() for i, k in enumerate(ordered_keys)}
     with section("send"):
         processed = ctx.processors.robot_action_processor((action_dict, obs_raw))
-        ctx.hardware.robot_wrapper.send_action(processed)
+        sent = ctx.hardware.robot_wrapper.send_action(processed)
+        if isinstance(sent, dict) and sent.keys() == action_dict.keys():
+            return sent
     return action_dict

@@ -511,6 +511,16 @@ class LeRobotDataset(torch.utils.data.Dataset):
         """
         self._require_writer("add_frame").add_frame(frame)
 
+    def wait_for_video_encoder(self) -> None:
+        """Wait for streaming video startup after adding the episode's first frame.
+
+        This is a no-op when streaming encoding is disabled. Control loops should
+        hold the robot before adding that frame and waiting for initialization.
+        """
+        encoder = self._require_writer("wait_for_video_encoder")._streaming_encoder
+        if encoder is not None:
+            encoder.wait_until_ready()
+
     def save_episode(self, episode_data: dict | None = None, parallel_encoding: bool = True) -> None:
         """Save the current episode buffer to disk.
 

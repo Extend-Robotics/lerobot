@@ -3,7 +3,7 @@
     "type": "episodic"
   },
   "policy": {
-    "path": "/home/oleg/extend_lerobot/pretrained_model_50k/pretrained_model"
+    "path": "/home/oleg/extend_lerobot/checkpoints/040000_rel/pretrained_model"
   },
   "inference": {
     "type": "rtc",
@@ -15,12 +15,12 @@
   },
   "robot": {
     "type": "so101_follower",
-    "port": "/dev/ttyACM0",
+    "port": "/dev/ttyACM1",
     "id": "my_awesome_follower_arm",
     "cameras": {
       "front": {
         "type": "opencv",
-        "index_or_path": "/dev/video2",
+        "index_or_path": "/dev/video6",
         "width": 640,
         "height": 480,
         "fps": 30
@@ -36,7 +36,7 @@
   },
   "teleop": {
     "type": "so101_leader",
-    "port": "/dev/ttyACM1",
+    "port": "/dev/ttyACM0",
     "id": "my_awesome_leader_arm"
   },
   "dataset": {
@@ -48,8 +48,7 @@
     "num_episodes": 100,
     "fps": 30,
     "streaming_encoding": true,
-    "dataset.encoder_threads": 2,
-    "episode_time_s": 30,
+    "episode_time_s": 3000,
     "reset_time_s": 5
   },
   "fps": 30,
