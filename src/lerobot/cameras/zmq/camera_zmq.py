@@ -15,16 +15,10 @@
 # limitations under the License.
 
 """
-ZMQCamera - Captures frames from remote cameras via ZeroMQ using JSON protocol in the
-following format:
-    {
-        "timestamps": {"camera_name": float},
-        "images": {"camera_name": "<base64-jpeg>"}
-    }
+ZMQCamera receives single-part binary JPEG messages on an exact camera topic.
+Server and client must both use the versioned binary protocol in protocol.py.
 """
 
-import base64
-import json
 import logging
 import time
 from threading import Event, Lock, Thread
@@ -47,6 +41,7 @@ from lerobot.utils.errors import DeviceNotConnectedError
 from ..camera import Camera
 from ..configs import ColorMode
 from .configuration_zmq import ZMQCameraConfig
+from .protocol import camera_topic, unpack_frame
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +51,7 @@ class ZMQCamera(Camera):
     Manages camera interactions via ZeroMQ for receiving frames from a remote server.
 
     This class connects to a ZMQ Publisher, subscribes to frame topics, and decodes
-    incoming JSON messages containing Base64 encoded images. It supports both
+    incoming binary JPEG frames. It supports both
     synchronous and asynchronous frame reading patterns.
 
     Example usage:
@@ -88,6 +83,10 @@ class ZMQCamera(Camera):
         self.server_address = config.server_address
         self.port = config.port
         self.camera_name = config.camera_name
+        self._topic = camera_topic(self.camera_name)
+        self._last_session: bytes | None = None
+        self._last_sequence = -1
+        self._last_source_timestamp: float | None = None
         self.color_mode = config.color_mode
         self.timeout_ms = config.timeout_ms
 
@@ -126,7 +125,10 @@ class ZMQCamera(Camera):
         try:
             self.context = zmq.Context()
             self.socket = self.context.socket(zmq.SUB)
-            self.socket.setsockopt_string(zmq.SUBSCRIBE, "")
+            self._last_session = None
+            self._last_sequence = -1
+            self._last_source_timestamp = None
+            self.socket.setsockopt(zmq.SUBSCRIBE, self._topic)
             self.socket.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
             self.socket.setsockopt(zmq.CONFLATE, True)
             self.socket.connect(f"tcp://{self.server_address}:{self.port}")
@@ -195,19 +197,14 @@ class ZMQCamera(Camera):
             if not self.socket.poll(timeout=max(1, min(100, int(remaining_ms)))):
                 continue
             try:
-                data = json.loads(self.socket.recv_string(zmq.NOBLOCK))
+                message = self.socket.recv(zmq.NOBLOCK)
             except zmq.Again:
                 continue
-            if "images" not in data:
-                raise RuntimeError(f"{self} invalid message: missing 'images' key")
-            # The publisher may omit cameras without a new frame in this message.
-            # Never substitute another camera, or refresh our timestamp for it.
-            if self.camera_name in data["images"]:
-                img_b64 = data["images"][self.camera_name]
-                break
+            session, sequence, source_timestamp, img_bytes = unpack_frame(message, self.camera_name)
+            if session == self._last_session and sequence <= self._last_sequence:
+                continue
+            break
 
-        # Decode base64 JPEG
-        img_bytes = base64.b64decode(img_b64)
         frame = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
 
         if frame is None:
@@ -219,6 +216,9 @@ class ZMQCamera(Camera):
         if self.color_mode == ColorMode.RGB:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
+        self._last_session = session
+        self._last_sequence = sequence
+        self._last_source_timestamp = source_timestamp
         return frame
 
     @check_if_not_connected

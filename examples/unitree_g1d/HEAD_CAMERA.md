@@ -6,7 +6,7 @@ now enables `head_camera`, `left_wrist_camera`, and `right_wrist_camera` at
 before standard teleoperation or recording starts. These are stream names, not
 USB device identities: map each physical camera on the robot first.
 
-Images flow from OpenCV/V4L2 on the robot → JPEG/base64 JSON over ZMQ TCP 5555 →
+Images flow from OpenCV/V4L2 on the robot → binary JPEG on exact per-camera topics over ZMQ TCP 5555 →
 three named ZMQ receivers on the host → LeRobot observations and dataset videos.
 The host does not need local `/dev/video*` devices. Capture threads run independently;
 there is no depth or hardware synchronization between cameras or joint state.
@@ -258,3 +258,42 @@ sudo systemctl start teleimager.service
 The commands and schema are checked against this checkout. Three physical cameras
 and end-to-end robot recording require validation on g1d and the host; local tests
 use synthetic frames and do not move hardware.
+
+
+## Camera latency and jitter diagnostic
+
+With the updated binary-protocol publisher running, run from the repository root:
+
+```bash
+uv run --no-sync python examples/unitree_g1d/measure_cameras.py \
+  --config examples/unitree_g1d/camera_diagnostic.json \
+  --seconds 30 --output outputs/camera_diagnostic
+```
+
+The diagnostic-only config targets the three camera names at `192.168.123.164:5555`.
+Edit it for a different server. This script opens camera subscriptions only; `--ik`
+optionally adds synthetic IK computation without motor commands. Each phase lasts
+`--seconds`; phases compare baseline, wire-only, one/three adapters, OpenCV thread
+limits, and all-camera decoding in a shared thread. These clients run in one process.
+
+The report includes population latency variance (ms²), standard deviation (ms),
+absolute consecutive delay changes (jitter), frame gaps, and skipped sequences.
+A constant host/server clock offset cancels from variance and jitter, but drift or
+clock steps can distort them. Absolute latency requires a measured clock offset:
+add `--clock-offset-ms 0` for synchronized clocks, or the known host-minus-server
+offset in milliseconds. Without it, the report labels timestamp differences as
+uncalibrated clock deltas. The offset applies to all configured servers.
+
+Latency starts at server OpenCV capture completion, before JPEG encoding,
+and ends at host receive completion (wire-only) or decode completion (adapter and
+shared-decode phases). It excludes sensor exposure, driver buffering, and display.
+The separate receive-age metric measures time spent in the host's decoded buffer.
+Results are saved in `report.md`, `report.json`, `frames.csv` (raw timestamps and
+frame IDs), and `resources.csv`. Both server and client require the binary protocol.
+
+
+The publisher captures in native BGR, encodes each newest unprocessed frame once,
+and wakes the publishing thread as soon as its JPEG is ready. `--fps` sets camera
+capture FPS; publishing has no independent periodic timer. Each camera has one
+latest-frame slot, so slow encoding or sending skips older frames rather than
+building a queue of stale images. The wire protocol and launch command are unchanged.

@@ -1,7 +1,7 @@
 {
   "dataset": {
-    "repo_id": "local/g1d_bottles_merged_filtered",
-    "root": "/data/datasets/g1d_bottles_merged_filtered",
+    "repo_id": "local/g1d_bottles_merged_filtered_with_days_3_4_5",
+    "root": "/home/oleg/extend_lerobot/lerobot/datasets/g1d_bottles/g1d_bottles_merged_filtered_with_days_3_4_5",
     "eval_split": 0.0,
     "image_transforms": {
       "enable": true,
@@ -48,14 +48,14 @@
     "optimizer_eps": 1e-08,
     "optimizer_weight_decay": 0.01,
     "optimizer_grad_clip_norm": 1.0,
-    "scheduler_warmup_steps": 1000,
-    "scheduler_decay_steps": 50000,
+    "scheduler_warmup_steps": 2000,
+    "scheduler_decay_steps": 100000,
     "scheduler_decay_lr": 2.5e-06,
     "empty_cameras": 0,
     "freeze_vision_encoder": false,
     "train_expert_only": false,
     "gradient_checkpointing": true,
-    "compile_model": false,
+    "compile_model": true,
     "compile_mode": "default",
     "dtype": "bfloat16",
     "rtc_training_max_delay": 10,
@@ -71,13 +71,16 @@
     ]
   },
   "accelerator": {
-    "mixed_precision": "bf16"
+    "mixed_precision": "bf16",
+    "gradient_accumulation": {
+      "steps": 2
+    }
   },
   "output_dir": "/data/outputs/g1d_bottles_merged_filtered",
   "job_name": "g1d_bottles_merged_filtered",
-  "batch_size": 32,
+  "batch_size": 16,
   "num_workers": 4,
-  "steps": 50000,
+  "steps": 100000,
   "save_freq": 10000,
   "seed": 1000,
   "wandb": {

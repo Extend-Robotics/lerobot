@@ -63,7 +63,7 @@ def serve_hand(config: BraincoRevo2HandConfig, stop: threading.Event, bind: str 
                     hand.send_action(dict(zip(hand.action_features, q, strict=True)))
                 except (KeyError, TypeError, ValueError, TimeoutError, PermissionError) as exc:
                     logger.warning("Rejected %s hand command: %s", config.side, exc)
-            stop.wait(0.01)
+            stop.wait(0.001)
     finally:
         hand.disconnect()
         state_socket.close(linger=0)
