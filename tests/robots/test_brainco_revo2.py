@@ -314,8 +314,10 @@ def test_zmq_roundtrip_with_real_sockets():
         commands.close(linger=0)
 
 
-@pytest.mark.parametrize("mode", ["readonly", "valid", "expired", "invalid_speed"])
-def test_hand_bridge_read_only_and_command_validation(mode, tmp_path):
+@pytest.mark.parametrize(
+    "mode", ["readonly", "valid", "small_clock_offset", "expired", "future", "nonfinite", "invalid_speed"]
+)
+def test_hand_bridge_read_only_and_command_validation(mode, tmp_path, caplog):
     zmq = pytest.importorskip("zmq")
     from lerobot.robots.brainco_revo2.bridge import serve_hand
 
@@ -328,13 +330,20 @@ def test_hand_bridge_read_only_and_command_validation(mode, tmp_path):
     stop.is_set.side_effect = [False, True]
     state, commands = MagicMock(), MagicMock()
     commands.poll.return_value = True
+    now = time.time()
     commands.recv_json.return_value = {
         "positions": [0.4] * 6,
         "speed": float("nan") if mode == "invalid_speed" else 0.3,
-        "expires_at": time.time() + (-1 if mode == "expired" else 0.4),
+        "expires_at": {
+            "expired": now - 0.001,
+            "small_clock_offset": now + 0.503,
+            "future": now + 0.511,
+            "nonfinite": float("nan"),
+        }.get(mode, now + 0.4),
     }
     with (
         patch("lerobot.robots.brainco_revo2.bridge.BraincoRevo2Hand", return_value=hand),
+        patch("lerobot.robots.brainco_revo2.bridge.time.time", return_value=now),
         patch.object(zmq.Context, "instance") as context,
     ):
         context.return_value.socket.side_effect = [state, commands]
@@ -343,11 +352,18 @@ def test_hand_bridge_read_only_and_command_validation(mode, tmp_path):
         assert state.send_json.call_args.args[0]["observed_at"] <= time.time()
         if mode == "readonly":
             context.return_value.socket.assert_called_once_with(zmq.PUB)
-        if mode == "valid":
+        if mode in ("valid", "small_clock_offset"):
             hand.send_action.assert_called_once_with(dict.fromkeys(hand.action_features, 0.4))
             assert config.speed == 0.3
         else:
             hand.send_action.assert_not_called()
+        if mode == "expired":
+            assert "Command expired" in caplog.text
+            assert "ms ago" in caplog.text
+        elif mode == "future":
+            assert "ahead of bridge clock (maximum 510.000 ms" in caplog.text
+        elif mode == "nonfinite":
+            assert "Command deadline must be finite" in caplog.text
         hand.disconnect.assert_called_once()
         state.close.assert_called_once_with(linger=0)
 
@@ -364,3 +380,36 @@ def test_zmq_old_buffered_feedback_preserves_source_age():
     }
     assert time.monotonic() - transport.read()[1] >= 9.9
     transport.close()
+
+
+@pytest.mark.parametrize(
+    ("interface", "verbosity", "expected"),
+    [("eth0", "config", "none"), ("eth0", "warning", "warning"), (None, "config", "config")],
+)
+def test_dds_initialization_disables_crashing_sdk_config_trace(interface, verbosity, expected):
+    from lerobot.robots.brainco_revo2.transport import initialize_dds
+
+    module = "lerobot.robots.brainco_revo2.transport"
+    template = (
+        '<CycloneDDS><Domain><General><Interfaces><NetworkInterface name="$__IF_NAME__$"/>'
+        f"</Interfaces></General><Tracing><Verbosity>{verbosity}</Verbosity></Tracing>"
+        "</Domain></CycloneDDS>"
+    )
+    sdk = SimpleNamespace(ChannelConfigHasInterface=template)
+
+    def initialize(domain, network_interface):
+        # The workaround must run before native DDS initialization can abort.
+        assert sdk.ChannelConfigHasInterface == template.replace(
+            f"<Verbosity>{verbosity}</Verbosity>", f"<Verbosity>{expected}</Verbosity>"
+        )
+
+    with (
+        patch(f"{module}.require_package"),
+        patch(f"{module}.sdk_channel", sdk, create=True),
+        patch(f"{module}.ChannelFactoryInitialize", side_effect=initialize, create=True) as factory,
+    ):
+        config = BraincoRevo2HandConfig(transport="dds", network_interface=interface, domain_id=3)
+        initialize_dds(config)
+        initialize_dds(config)  # Repeated initialization must remain harmless.
+        assert factory.call_count == 2
+        factory.assert_called_with(3, interface)

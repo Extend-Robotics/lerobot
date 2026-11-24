@@ -11,7 +11,7 @@
     "queue_threshold": 15
   },
   "policy": {
-    "path": "/home/oleg/extend_lerobot/checkpoints/g1d_bottles_merged_filtered/050000/pretrained_model"
+    "path": "/home/oleg/extend_lerobot/checkpoints/g1d_bottles_merged_filtered/080000/pretrained_model"
   },
   "robot": {
     "type": "unitree_g1",

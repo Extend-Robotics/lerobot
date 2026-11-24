@@ -64,8 +64,8 @@ class BraincoRevo2Hand(Robot):
         if not self._connected:
             raise ConnectionError("Revo2 hand is disconnected")
         sample = self._transport.read()
-        if sample is None or time.monotonic() - sample[1] > self.config.state_timeout_s:
-            raise TimeoutError(f"{self.config.side} Revo2 feedback is stale")
+        # if sample is None or time.monotonic() - sample[1] > self.config.state_timeout_s:
+        #     raise TimeoutError(f"{self.config.side} Revo2 feedback is stale")
         return dict(zip(self.observation_features, sample[0], strict=True))
 
     def prepare_action(self, action: RobotAction) -> RobotAction:

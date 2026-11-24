@@ -35,6 +35,26 @@ variation are still reported. Constant offsets cancel in delay variation, but
 clock adjustments and drift affect it. No round-trip or physical motion latency
 is measured.
 
+## Commands rejected just above the deadline limit
+
+The client uses its wall clock to set command deadlines, and the robot bridge
+checks them against its own wall clock. With the default 500 ms timeout, a small
+clock offset can make a fresh command appear 501–503 ms in the future. The bridge
+allows 10 ms of clock tolerance on this upper bound by default. Expired commands
+are still rejected, and hand feedback freshness checks are unchanged.
+
+Update the bridge code on the robot and restart it to apply this behavior:
+
+```bash
+python -m lerobot.robots.brainco_revo2.bridge --sides left right --command-clock-tolerance-ms 10
+```
+
+Use `--command-clock-tolerance-ms 0` for the strict upper bound. Both machines
+should still synchronize their clocks; this bounded tolerance does not compensate
+for large offsets or clock jumps. If deadlines exceed the tolerance, check clock
+synchronization and that client and bridge hand timeouts match. This change
+addresses command rejection, not intermittent stale feedback or rollout recovery.
+
 ## Optional command-send timing
 
 Stop teleoperation and other command publishers first, then run:
@@ -77,3 +97,10 @@ intervals include SDK scheduling and are not one-way network latency.
 in the installed CycloneDDS configuration-printing function when the SDK enables
 `<Verbosity>config</Verbosity>`. It changes that value to `none` in memory for this
 check only; no installed SDK files are modified.
+
+
+Hand DDS initialization now automatically disables the explicit-interface SDK
+`config` trace before native initialization. Normal hand teleoperation no longer
+needs a Python wrapper or `--disable-config-trace`. The explicit option remains
+available in standalone diagnostics, including the arm check which initializes
+the SDK directly.

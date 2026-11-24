@@ -17,9 +17,16 @@ from .transport import initialize_dds
 logger = logging.getLogger(__name__)
 
 
-def serve_hand(config: BraincoRevo2HandConfig, stop: threading.Event, bind: str = "0.0.0.0") -> None:
+def serve_hand(
+    config: BraincoRevo2HandConfig,
+    stop: threading.Event,
+    bind: str = "0.0.0.0",
+    command_clock_tolerance_s: float = 0.01,
+) -> None:
     import zmq
 
+    if not math.isfinite(command_clock_tolerance_s) or command_clock_tolerance_s < 0:
+        raise ValueError("Command clock tolerance must be finite and nonnegative")
     hand = BraincoRevo2Hand(config)
     ctx = zmq.Context.instance()
     state_socket = ctx.socket(zmq.PUB)
@@ -53,8 +60,23 @@ def serve_hand(config: BraincoRevo2HandConfig, stop: threading.Event, bind: str 
                     data = command_socket.recv_json()
                     expires = float(data["expires_at"])
                     remaining = expires - time.time()
-                    if not math.isfinite(expires) or not 0 < remaining <= config.state_timeout_s:
-                        raise ValueError("Expired command or unsynchronized client/server clocks")
+                    if not math.isfinite(expires):
+                        raise ValueError("Command deadline must be finite")
+                    if remaining <= 0:
+                        raise ValueError(
+                            f"Command expired {-remaining * 1000:.3f} ms ago; "
+                            "check transport delay and client/server clock synchronization"
+                        )
+                    # Epoch deadlines compare clocks on two machines. Allow a small,
+                    # bounded offset on the future side; never revive an expired command.
+                    max_remaining = config.state_timeout_s + command_clock_tolerance_s
+                    if remaining > max_remaining:
+                        raise ValueError(
+                            f"Command deadline is {remaining * 1000:.3f} ms ahead of bridge clock "
+                            f"(maximum {max_remaining * 1000:.3f} ms, including "
+                            f"{command_clock_tolerance_s * 1000:.3f} ms clock tolerance); "
+                            "check client/server clock synchronization and matching hand timeouts"
+                        )
                     speed = float(data["speed"])
                     if not math.isfinite(speed) or not 0 < speed <= 1:
                         raise ValueError("Speed must be normalized in (0, 1]")
@@ -80,7 +102,18 @@ def main() -> None:
     parser.add_argument("--network-interface")
     parser.add_argument("--domain-id", type=int, default=0)
     parser.add_argument("--bind", default="0.0.0.0")
+    parser.add_argument(
+        "--command-clock-tolerance-ms",
+        type=float,
+        default=10.0,
+        help=(
+            "Allowed clock offset for future command deadlines in ms (default: 10); "
+            "expired commands remain rejected"
+        ),
+    )
     args = parser.parse_args()
+    if not math.isfinite(args.command_clock_tolerance_ms) or args.command_clock_tolerance_ms < 0:
+        parser.error("--command-clock-tolerance-ms must be finite and nonnegative")
     logging.basicConfig(level=logging.INFO)
     stop = threading.Event()
     # Initialize the process-global DDS factory before starting parallel hand readers.
@@ -103,6 +136,7 @@ def main() -> None:
                 ),
                 stop,
                 args.bind,
+                command_clock_tolerance_s=args.command_clock_tolerance_ms / 1000,
             )
         except Exception as exc:
             failures.append(exc)

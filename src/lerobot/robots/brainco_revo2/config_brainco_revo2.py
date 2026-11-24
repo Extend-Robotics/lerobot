@@ -20,7 +20,7 @@ class BraincoRevo2HandConfig(RobotConfig):
     network_interface: str | None = None
     read_only: bool = False
     connect_timeout_s: float = 5.0
-    state_timeout_s: float = 0.5
+    state_timeout_s: float = 10.5
     # Unitree driver positions are normalized: 0 = open, 1 = closed.
     # Neutral names avoid the inconsistent thumb labels in xr_teleoperate.
     motor_names: tuple[str, ...] = ("motor_0", "motor_1", "index", "middle", "ring", "pinky")

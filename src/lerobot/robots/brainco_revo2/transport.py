@@ -13,6 +13,7 @@ from lerobot.utils.import_utils import _unitree_sdk_available, require_package
 from .config_brainco_revo2 import BraincoRevo2HandConfig
 
 if TYPE_CHECKING or _unitree_sdk_available:
+    from unitree_sdk2py.core import channel as sdk_channel
     from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber
     from unitree_sdk2py.idl.default import unitree_go_msg_dds__MotorCmd_
     from unitree_sdk2py.idl.unitree_go.msg.dds_ import MotorCmds_, MotorStates_
@@ -24,6 +25,14 @@ _DDS_SETUP_LOCK = threading.RLock()
 def initialize_dds(config: BraincoRevo2HandConfig) -> None:
     require_package("unitree-sdk2py", extra="unitree_g1", import_name="unitree_sdk2py")
     with _DDS_SETUP_LOCK:
+        if config.network_interface is not None:
+            # Some SDK installations enable config tracing for explicit interfaces.
+            # The installed CycloneDDS 0.10.x can abort in do_print_uint32_bitset
+            # while printing that config. Disable this startup trace in memory;
+            # retain the SDK's network settings and leave installed files intact.
+            sdk_channel.ChannelConfigHasInterface = sdk_channel.ChannelConfigHasInterface.replace(
+                "<Verbosity>config</Verbosity>", "<Verbosity>none</Verbosity>"
+            )
         ChannelFactoryInitialize(config.domain_id, config.network_interface)
 
 
