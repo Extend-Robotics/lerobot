@@ -205,6 +205,15 @@ class Robot(abc.ABC):
         """
         pass
 
+    def hold_position(self) -> None:
+        """Declare an intentional pause until the next accepted action.
+
+        Drivers with a command watchdog may keep publishing their last accepted
+        target during the pause. Feedback and publisher failures must still stop
+        control. Drivers without this capability need no additional action.
+        """
+        return None
+
     @abc.abstractmethod
     def disconnect(self) -> None:
         """Disconnect from the robot and perform any necessary cleanup."""
