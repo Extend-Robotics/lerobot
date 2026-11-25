@@ -16,6 +16,7 @@
 
 from .config import RobotConfig
 from .robot import Robot
+from .tianji import Tianji, TianjiConfig
 from .utils import make_robot_from_config
 
-__all__ = ["Robot", "RobotConfig", "make_robot_from_config"]
+__all__ = ["Robot", "RobotConfig", "Tianji", "TianjiConfig", "make_robot_from_config"]
