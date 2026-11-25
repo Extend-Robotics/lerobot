@@ -99,6 +99,7 @@ from lerobot.robots import (  # noqa: F401
     reachy2,
     rebot_b601_follower,
     so_follower,
+    tianji,
     unitree_g1 as unitree_g1_robot,
 )
 from lerobot.teleoperators import (  # noqa: F401
@@ -273,7 +274,12 @@ def teleoperate(cfg: TeleoperateConfig):
 
     try:
         teleop.connect()
-        robot.connect()
+        if robot.name == "tianji" and getattr(teleop, "name", None) == "bi_pico4":
+            from lerobot.teleoperators.bi_pico4.tianji_processor import connect_tianji_pico
+
+            connect_tianji_pico(robot, teleop, teleop_action_processor)
+        else:
+            robot.connect()
         teleop_loop(
             teleop=teleop,
             robot=robot,

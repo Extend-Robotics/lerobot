@@ -1,0 +1,15 @@
+{
+  "robot": {
+    "type": "tianji",
+    "control_mode": "joint_impedance",
+    "ik_posture_weight": 0.001,
+    "clear_faults_on_connect": true,
+    "move_to_start_on_connect": true,
+    "robot_ip": "6.6.7.190",
+    "kinematics_library": "vendor/wuji-hand-teleop/src/output_devices/tianji_output/tianji_output/_internal/lib/libKine.so",
+    "kinematics_model": "vendor/wuji-hand-teleop/src/output_devices/tianji_world_output/tianji_world_output/config/ccs_m6.MvKDCfg"
+  },
+  "teleop": {"type": "bi_pico4", "output_mode": "xr", "input_timeout_s": 0.5},
+  "fps": 100,
+  "display_data": false
+}

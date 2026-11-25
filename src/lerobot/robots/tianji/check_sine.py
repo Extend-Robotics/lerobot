@@ -29,6 +29,11 @@ SAMPLE_RATE_HZ = 25
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("host", help="Arm controller hostname or IPv4 address")
+    parser.add_argument(
+        "--clear-fault",
+        action="store_true",
+        help="Clear latched faults before motion after resolving the cause and releasing the E-stop",
+    )
     args = parser.parse_args()
 
     errors = []
@@ -37,8 +42,10 @@ def main() -> None:
         robot = Tianji(TianjiConfig(robot_ip=gethostbyname(args.host)))
         try:
             robot.connect()
-            print(f"Moving {JOINT} by ±1° for one {PERIOD_S}s cycle", flush=True)
+            if args.clear_fault:
+                robot.clear_faults()
             baseline = robot.enable_position_control()
+            print(f"Moving {JOINT} by ±1° for one {PERIOD_S}s cycle", flush=True)
             center = baseline[JOINT]
             steps = PERIOD_S * SAMPLE_RATE_HZ
             for step in range(steps + 1):

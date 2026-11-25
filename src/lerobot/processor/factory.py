@@ -93,6 +93,35 @@ def make_default_processors(robot=None, teleop=None):
                 grip_disable_threshold=teleop.config.grip_disable_threshold,
             )
         ]
+    if robot is not None and robot.name == "tianji" and getattr(teleop, "name", None) == "bi_pico4":
+        from lerobot.robots.tianji.kinematics import TianjiKinematics
+        from lerobot.teleoperators.bi_pico4.tianji_processor import PicoToTianjiJoints
+        from lerobot.teleoperators.bi_pico4.wrist_calibration import WristCalibration
+
+        if teleop.config.output_mode != "xr":
+            raise ValueError("Tianji/Pico requires teleop.output_mode=xr")
+        if robot.config.kinematics_library is None or robot.config.kinematics_model is None:
+            raise ValueError("Tianji/Pico requires robot.kinematics_library and robot.kinematics_model")
+        teleop_action_processor.steps = [
+            PicoToTianjiJoints(
+                last_sent_action=lambda: robot.last_sent_action,
+                calibration=(
+                    WristCalibration.load(robot.config.pico_wrist_calibration)
+                    if robot.config.pico_wrist_calibration
+                    else None
+                ),
+                solver=TianjiKinematics(
+                    robot.config.kinematics_library,
+                    robot.config.kinematics_model,
+                    robot.config.ik_posture_weight,
+                ),
+                timeout_s=teleop.config.input_timeout_s,
+                max_target_delta_deg=robot.config.max_target_delta_deg,
+                max_seed_delta_deg=robot.config.ik_max_seed_delta_deg,
+                grip_enable_threshold=teleop.config.grip_enable_threshold,
+                grip_disable_threshold=teleop.config.grip_disable_threshold,
+            )
+        ]
     robot_action_processor = make_default_robot_action_processor()
     robot_observation_processor = make_default_robot_observation_processor()
     return (teleop_action_processor, robot_action_processor, robot_observation_processor)

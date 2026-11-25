@@ -119,10 +119,15 @@ class Marvin_Robot:  # noqa: N801 - Preserve the vendor wrapper name.
                 ("OnSetJointCmdPos", [ctypes.POINTER(ctypes.c_double)]),
                 ("OnSetJointLmt", [ctypes.c_int, ctypes.c_int]),
                 ("OnSetTargetState", [ctypes.c_int]),
+                ("OnSetJointKD", [ctypes.POINTER(ctypes.c_double)] * 2),
+                ("OnSetImpType", [ctypes.c_int]),
             ):
                 function = getattr(self.robot, f"{name}_{arm}")
                 function.argtypes = argtypes
                 function.restype = ctypes.c_bool
+            clear_error = getattr(self.robot, f"OnClearErr_{arm}")
+            clear_error.argtypes = []
+            clear_error.restype = None
         self.robot.OnRelease.argtypes = []
         self.robot.OnRelease.restype = ctypes.c_int
 
@@ -141,6 +146,12 @@ class Marvin_Robot:  # noqa: N801 - Preserve the vendor wrapper name.
         if self.robot.OnClearSet():
             self.robot.OnSetSend()
 
+    def clear_faults(self, arms: tuple[str, ...]) -> None:
+        self._check(self.robot.OnClearSet(), "clear the command buffer")
+        for arm in arms:
+            getattr(self.robot, f"OnClearErr_{arm}")()
+        self._check(self.robot.OnSetSend(), "queue fault clear")
+
     def send_joint_positions(
         self, left: list[float], right: list[float], *, speed_ratio: int | None = None
     ) -> None:
@@ -158,6 +169,20 @@ class Marvin_Robot:  # noqa: N801 - Preserve the vendor wrapper name.
         self._check(self.robot.OnSetTargetState_A(state), f"set arm A state to {state}")
         self._check(self.robot.OnSetTargetState_B(state), f"set arm B state to {state}")
         self._check(self.robot.OnSetSend(), "queue arm state change")
+
+    def set_joint_impedance_gains(self, stiffness: tuple[float, ...], damping: tuple[float, ...]) -> None:
+        k = (ctypes.c_double * 7)(*stiffness)
+        d = (ctypes.c_double * 7)(*damping)
+        self._check(self.robot.OnClearSet(), "clear the command buffer")
+        self._check(self.robot.OnSetJointKD_A(k, d), "stage arm A joint impedance gains")
+        self._check(self.robot.OnSetJointKD_B(k, d), "stage arm B joint impedance gains")
+        self._check(self.robot.OnSetSend(), "queue joint impedance gains")
+
+    def select_joint_impedance(self) -> None:
+        self._check(self.robot.OnClearSet(), "clear the command buffer")
+        self._check(self.robot.OnSetImpType_A(1), "select arm A joint impedance")
+        self._check(self.robot.OnSetImpType_B(1), "select arm B joint impedance")
+        self._check(self.robot.OnSetSend(), "queue joint impedance type")
 
     @staticmethod
     def _check(result: bool, operation: str) -> None:

@@ -130,6 +130,7 @@ from lerobot.robots import (  # noqa: F401
     reachy2,
     rebot_b601_follower,
     so_follower,
+    tianji,
     unitree_g1 as unitree_g1_robot,
 )
 from lerobot.teleoperators import (  # noqa: F401
@@ -292,6 +293,9 @@ def record_loop(
 
     if timer is None:
         timer = CycleTimer(fps, records_data=dataset is not None)
+
+    if robot.name == "tianji" and getattr(teleop, "name", None) == "bi_pico4":
+        teleop_action_processor.reset()
 
     no_action_count = 0
     first_recorded_frame = True
@@ -510,7 +514,12 @@ def record(
         # tripping a firmware watchdog) during teleop init. Matches lerobot_teleoperate.py.
         if teleop is not None:
             teleop.connect()
-        robot.connect()
+        if robot.name == "tianji" and getattr(teleop, "name", None) == "bi_pico4":
+            from lerobot.teleoperators.bi_pico4.tianji_processor import connect_tianji_pico
+
+            connect_tianji_pico(robot, teleop, teleop_action_processor)
+        else:
+            robot.connect()
 
         listener, events = init_keyboard_listener()
 
@@ -598,15 +607,17 @@ def record(
         # is most useful before the video encoding and the hub upload scroll it away.
         timer.log_run_summary()
 
+        try:
+            try:
+                if robot.is_connected:
+                    robot.disconnect()
+            finally:
+                if teleop and teleop.is_connected:
+                    teleop.disconnect()
+        finally:
+            if dataset:
+                dataset.finalize()
         log_say("Stop recording", cfg.play_sounds, blocking=True)
-
-        if dataset:
-            dataset.finalize()
-
-        if robot.is_connected:
-            robot.disconnect()
-        if teleop and teleop.is_connected:
-            teleop.disconnect()
 
         if listener is not None:
             listener.stop()
